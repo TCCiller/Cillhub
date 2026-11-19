@@ -11,13 +11,17 @@ import { LegalLinks } from '../legal/LegalPages'
 
 export function InvitePage({ code }: { code: string }) {
   const token = useStore((s) => s.token)
-  const [invite, setInvite] = useState<Invite | null>(null)
+  // The shown invite remembers its code: while another code loads, nothing (and no Join) is shown, and Join only
+  // ever joins the code whose data is on screen.
+  const [loaded, setLoaded] = useState<{ code: string; invite: Invite } | null>(null)
+  const invite = loaded?.code === code ? loaded.invite : null
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
+    setError('')
     // with_counts is the API's way to get member counts on an invite; fall back to the guild's member_count.
-    api<Invite>(`/invites/${encodeURIComponent(code)}?with_counts=true`).then(setInvite, (e: ApiError) =>
+    api<Invite>(`/invites/${encodeURIComponent(code)}?with_counts=true`).then((i) => setLoaded({ code, invite: i }), (e: ApiError) =>
       setError(e.code === 10006 || e.status === 404 ? t('This invite is invalid or has expired.') : e.message),
     )
   }, [code])
@@ -25,8 +29,9 @@ export function InvitePage({ code }: { code: string }) {
   const count = invite?.approximate_member_count ?? invite?.guild.member_count
   const join = () => {
     if (!token) return navigate(`/login?next=${encodeURIComponent(location.pathname)}`)
+    if (!loaded || loaded.code !== code) return
     setBusy(true)
-    joinInvite(code, invite?.channel.id).catch((e: Error) => (setError(e.message), setBusy(false)))
+    joinInvite(loaded.code, loaded.invite.channel.id).catch((e: Error) => (setError(e.message), setBusy(false)))
   }
 
   return (

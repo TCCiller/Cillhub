@@ -48,7 +48,7 @@ function Page() {
   if (instance?.setup_pending) return section === 'setup' ? <Suspense fallback={null}><Setup /></Suspense> : <Redirect to="/setup" />
   if (section === 'setup') return instance ? <Redirect to="/login" /> : null
   if (section === 'instances' && a === 'callback') return <InstanceCallback />
-  if (section === 'invite' && a) return <InvitePage code={decodeURIComponent(a)} />
+  if (section === 'invite' && a) return <InvitePage key={a} code={decodeURIComponent(a)} />
   // Template links open "Add a server" with the code (templates/Templates.tsx); after login when needed.
   if (section === 'template' && a) return sessionStorage.setItem('template-code', decodeURIComponent(a)), <Redirect to="/channels/@me" />
   if (section === 'reset') return <ResetPage />

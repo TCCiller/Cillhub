@@ -3,9 +3,12 @@ import { useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { patchSettings } from '../actions'
 import { cls } from '../components/ui'
 import { t } from '../i18n'
-import { getState, useStore } from '../store'
+import { useStore } from '../store'
 import { saveVoiceSettings } from '../voice/settings'
-import { ACTIONS, bindings, comboLabel, comboOf, conflicts } from './keybinds'
+import { ACTIONS, bindings, comboLabel, comboOf, conflicts, ownKeybinds } from './keybinds'
+import { bindable } from '../keyboard/keyrules'
+
+const saveOwn = (own: Record<string, string | null>) => void patchSettings({ keybinds: own })
 
 type Pending = { id: string; combo: string; clash: string[] }
 
@@ -14,14 +17,15 @@ export function KeybindSettings() {
   const [recording, setRecording] = useState<string | null>(null)
   const [pending, setPending] = useState<Pending | null>(null)
   const [, bump] = useState(0)
+  const [weak, setWeak] = useState<string | null>(null)
   const b = bindings()
   const label = (id: string) => t(ACTIONS.find((a) => a[0] === id)?.[1] ?? id)
   const assign = (id: string, combo: string, unbind: string[] = []) => {
-    const own = { ...getState().settings.keybinds }
+    const own = { ...ownKeybinds() }
     for (const other of unbind) other === 'push-to-talk' ? saveVoiceSettings({ pttKey: '' }) : (own[other] = null)
     if (id === 'push-to-talk') saveVoiceSettings({ pttKey: combo })
     else own[id] = combo || null
-    void patchSettings({ keybinds: own })
+    saveOwn(own)
     setPending(null)
     setRecording(null)
     bump((n) => n + 1)
@@ -33,6 +37,8 @@ export function KeybindSettings() {
     const raw = comboOf(e.nativeEvent)
     if (!raw) return
     const combo = id === 'push-to-talk' ? e.code : raw // push-to-talk is one held key
+    if (!bindable(id, combo)) return setWeak(id)
+    setWeak(null)
     const clash = conflicts(combo, id)
     if (clash.length) return setPending({ id, combo, clash })
     assign(id, combo)
@@ -42,6 +48,7 @@ export function KeybindSettings() {
       <h1>{t('Keybinds')}</h1>
       <p className="hint">{t('Select a shortcut, then press the new key combination. Global hotkeys of the desktop app stay in its own settings.')}</p>
       <div aria-live="assertive" className="keybind-live">
+        {weak && <p className="notice" role="alert">{t('{action} turns on your microphone, camera or screen: use a key with Ctrl, Alt or Cmd, or a key that types nothing (like F1-F12).', { action: label(weak) })}</p>}
         {pending && (
           <div className="notice" role="alert">
             {t('{combo} is already used for {other}.', { combo: comboLabel(pending.combo), other: pending.clash.map(label).join(', ') })}
@@ -75,7 +82,7 @@ export function KeybindSettings() {
         </tbody>
       </table>
       <div className="save-bar">
-        <button className="secondary" onClick={() => (saveVoiceSettings({ pttKey: 'Backquote' }), void patchSettings({ keybinds: {} }), bump((n) => n + 1))}>{t('Reset to defaults')}</button>
+        <button className="secondary" onClick={() => (saveVoiceSettings({ pttKey: 'Backquote' }), saveOwn({}), bump((n) => n + 1))}>{t('Reset to defaults')}</button>
       </div>
     </>
   )

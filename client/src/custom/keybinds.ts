@@ -4,6 +4,10 @@
 import { t } from '../i18n'
 import { getState } from '../store'
 import { voiceSettings } from '../voice/settings'
+import { bindable } from '../keyboard/keyrules'
+
+/** The user's own bindings (synced); a capture action never takes a key that types text (keyboard/keyrules.ts). */
+export const ownKeybinds = (): Record<string, string | null> => getState().settings.keybinds ?? {}
 
 export const ACTIONS: [id: string, label: string, combo: string][] = [
   ['quick-switcher', 'Quick Switcher', 'Ctrl+KeyK'],
@@ -32,8 +36,11 @@ export function comboOf(e: KeyboardEvent | { ctrlKey: boolean; metaKey: boolean;
 }
 /** All bindings in effect: defaults, the user's changes, and the push-to-talk key. */
 export function bindings(): Record<string, string> {
-  const own = getState().settings.keybinds ?? {}
-  return Object.fromEntries(ACTIONS.map(([id, , def]) => [id, id === 'push-to-talk' ? voiceSettings().pttKey : id in own ? own[id] ?? '' : def]))
+  const own = ownKeybinds()
+  return Object.fromEntries(ACTIONS.map(([id, , def]) => {
+    const combo = id === 'push-to-talk' ? voiceSettings().pttKey : id in own ? own[id] ?? '' : def
+    return [id, typeof combo === 'string' && bindable(id, combo) ? combo : '']
+  }))
 }
 /** The action bound to this key event, if any (Ctrl+/ also matches where "/" needs Shift, e.g. German layouts). */
 export function actionFor(e: KeyboardEvent): string | null {

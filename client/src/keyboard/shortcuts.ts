@@ -9,6 +9,7 @@ import { cmpId, getState, setState } from '../store'
 import type { Channel } from '../types'
 import { setSelfDeaf, setSelfMute, toggleCamera, toggleScreen } from '../voice/engine'
 import { deviceZoom, setDeviceZoom } from '../appearance/apply'
+import { firesWhileTyping, typingIn } from './keyrules'
 
 /** Shortcut list for the Ctrl+/ sheet: [keys, description], from the keybinds in effect (v6: rebindable). */
 export function shortcutList(): [string, string][] {
@@ -37,7 +38,7 @@ export function useShortcuts(guildId: string, channelId?: string) {
     const onKey = (e: KeyboardEvent) => {
       const { guildId: g, channelId: c } = where.current
       const s = getState()
-      const typing = e.target instanceof HTMLElement && e.target.closest('input, textarea, select, [contenteditable="true"]')
+      const typing = e.target instanceof Element && typingIn(e.target)
       const go = (to: string) => (e.preventDefault(), setState({ showNav: false }), navigate(to))
       if (e.defaultPrevented) return
       // Zoom shortcuts: Ctrl+- / Cmd+-, Ctrl+= / Cmd+=, Ctrl+0 / Cmd+0
@@ -62,6 +63,7 @@ export function useShortcuts(guildId: string, channelId?: string) {
       }
       const action = actionFor(e)
       if (!action || (e.target instanceof HTMLElement && e.target.closest('[data-keybind-recorder]'))) return
+      if (!firesWhileTyping(e, !!typing)) return // round 7 (A-R7-2): a key that types text is text
       if (action === 'quick-switcher') return e.preventDefault(), setState({ modal: { kind: 'quick-switcher' }, popout: null })
       if (action === 'shortcuts') return e.preventDefault(), setState({ modal: { kind: 'shortcuts' } })
       if (document.querySelector('dialog[open]')) return // dialogs keep their own keys

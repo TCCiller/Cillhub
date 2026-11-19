@@ -96,4 +96,6 @@ export const v8: Record<string, string> = {
   'You were invited to speak. Your microphone is muted; unmute when you are ready.': 'Du wurdest zum Sprechen eingeladen. Dein Mikrofon ist stummgeschaltet; schalte es wieder ein, wenn du bereit bist.',
   'You can speak now. Your microphone stays off until you unmute.': 'Du kannst jetzt sprechen. Dein Mikrofon bleibt aus, bis du die Stummschaltung aufhebst.',
   'Accept with a click or {keys}': 'Annehmen per Klick oder mit {keys}',
+  '{action} turns on your microphone, camera or screen: use a key with Ctrl, Alt or Cmd, or a key that types nothing (like F1-F12).':
+    '{action} schaltet Mikrofon, Kamera oder Bildschirm ein: Nimm eine Taste mit Strg, Alt oder Cmd oder eine Taste, die nichts tippt (etwa F1-F12).',
 }

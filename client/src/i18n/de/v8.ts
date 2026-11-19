@@ -101,4 +101,12 @@ export const v8: Record<string, string> = {
   'Form from {app}': 'Formular von {app}', 'an app': 'einer App',
   'An app on this server sent this form. What you enter goes to the app. Cillhub never asks for your password or recovery key in a form.':
     'Eine App auf diesem Server hat dieses Formular geschickt. Was du eingibst, geht an die App. Cillhub fragt in einem Formular nie nach deinem Passwort oder Wiederherstellungsschlüssel.',
+  'This address is on this computer or in a private network. To use it, type it in yourself under Settings › Private Nodes.':
+    'Diese Adresse liegt auf diesem Computer oder in einem privaten Netz. Um sie zu nutzen, gib sie selbst unter Einstellungen › Private Nodes ein.',
+  'From your account · not used on this device yet': 'Aus deinem Konto · auf diesem Gerät noch nicht genutzt',
+  'This address is on this computer or in a private network: remove it and type it in yourself to use it here.':
+    'Diese Adresse liegt auf diesem Computer oder in einem privaten Netz: Entferne sie und gib sie selbst ein, um sie hier zu nutzen.',
+  'Use {name} on this device?': '{name} auf diesem Gerät nutzen?', 'Use and sign in': 'Nutzen und anmelden', 'Use on this device': 'Auf diesem Gerät nutzen',
+  'Your account lists this node, but it was added on another device or by the server. Use it here only if you know this address.':
+    'Dein Konto listet diesen Node, aber er wurde auf einem anderen Gerät oder vom Server hinzugefügt. Nutze ihn hier nur, wenn du diese Adresse kennst.',
 }

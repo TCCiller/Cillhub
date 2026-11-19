@@ -7,23 +7,26 @@ import { FormError } from '../components/ui'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { addLink, addNode, MAX_NODES, normalizeServerUrl, parseAddLink, type SavedNode } from '../privateNodes'
-import { addPrivateNode, hubSession, reconnectNode, removePrivateNode, signInWindow } from '../instances/nodes'
+import { addPrivateNode, CONFIRM, confirmNode, hubSession, isConfirmed, reconnectNode, removePrivateNode, signInWindow } from '../instances/nodes'
+import { isPrivateAddress } from '../privateNodes'
 import { STATUS_TEXT } from '../instances/InstanceUI'
 import { useInstances, useNodeIssues } from '../instances/registry'
 import { useStore } from '../store'
 
 const host = (url: string) => new URL(url).host
-const REFUSED = { invalid: 'Enter only the server address, with https:// (http only for localhost), e.g. https://chat.example.org.', duplicate: 'This server is already in your list.', full: 'You can save up to {n} nodes.' }
+const REFUSED = { invalid: 'Enter only the server address, with https:// (http only for localhost), e.g. https://chat.example.org.', duplicate: 'This server is already in your list.', full: 'You can save up to {n} nodes.',
+  private: 'This address is on this computer or in a private network. To use it, type it in yourself under Settings › Private Nodes.' }
 
 const CONSENT = 'Cillhub signs you in there with your account here: the node gets your user name and avatar, never your password. Its servers then show up in your server list.'
 
 /** Checks the address, asks (`confirm`, unless the add-node page already did), then adds it under the name the node gives
  *  itself; resolves the error text, '' when cancelled, or null. */
-async function add(url: string, confirm = true): Promise<string | null> {
+async function add(url: string, confirm = true, typed = false): Promise<string | null> {
   const started = hubSession()
   const first = addNode(savedNodes(), url, '')
   if (!Array.isArray(first)) return t(REFUSED[first], { n: MAX_NODES })
   const origin = first.at(-1)!.origin
+  if (!typed && isPrivateAddress(origin)) return t(REFUSED.private) // round 7: never from a link, not even a probe
   if (origin === hubOrigin()) return t(REFUSED.duplicate)
   const info = await testNode(origin).catch(() => null)
   if (!info) return t('Could not connect to node at this address.')
@@ -31,7 +34,7 @@ async function add(url: string, confirm = true): Promise<string | null> {
   if (confirm && !(await ask({ title: t('Add {name}?', { name }), confirm: t('Add and sign in'),
     body: <><p className="add-node-address">{origin}</p><p>{t('This is a separate server with its own accounts and admins.')} {t(CONSENT)}</p></> }))) return ''
   try {
-    const refused = await addPrivateNode(origin, name, started)
+    const refused = await addPrivateNode(origin, name, started, typed)
     return refused === 'cancelled' ? '' : refused && t(REFUSED[refused], { n: MAX_NODES })
   } catch (e) {
     return e instanceof Error ? e.message : String(e)
@@ -49,14 +52,15 @@ export function PrivateNodes() {
   const hub = hubOrigin()
 
   const check = (url: string) => void testNode(url).then((i) => setLive((l) => ({ ...l, [url]: i })), () => setLive((l) => ({ ...l, [url]: false })))
-  useEffect(() => [hub, ...savedNodes().map((n) => n.origin)].forEach(check), [hub])
+  // nodes the account lists but this device has not confirmed are not contacted, not even to see if they answer
+  useEffect(() => [hub, ...savedNodes().map((n) => n.origin).filter(isConfirmed)].forEach(check), [hub])
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
     setBusy(true)
     setError('')
     const origin = normalizeServerUrl(address, true)
-    void add(address).then((err) => {
+    void add(address, true, true).then((err) => {
       setBusy(false)
       if (err !== null) return setError(err)
       setNodes(savedNodes()) // the new node itself arrives with the gateway's list update
@@ -77,6 +81,7 @@ export function PrivateNodes() {
     const inst = saved && instances.find((i) => i.url === url)
     const issue = saved && issues[url]
     const state = inst && !issue ? t(STATUS_TEXT[inst.status])
+      : issue?.why === CONFIRM ? t('From your account · not used on this device yet')
       : issue?.why === 'own-login' ? t('Needs its own login · not connected')
       : issue?.why === 'sign-in' ? t('Not connected')
       : issue ? t('Not connected: {reason} Retrying…', { reason: issue.why })
@@ -92,6 +97,11 @@ export function PrivateNodes() {
             </span>
           )}
         </div>
+        {issue?.why === CONFIRM && saved && (isPrivateAddress(url)
+          ? <span className="hint small">{t('This address is on this computer or in a private network: remove it and type it in yourself to use it here.')}</span>
+          : <button className="link" onClick={() => void ask({ title: t('Use {name} on this device?', { name: saved.name || host(url) }), confirm: t('Use and sign in'),
+            body: <><p className="add-node-address">{url}</p><p>{t('Your account lists this node, but it was added on another device or by the server. Use it here only if you know this address.')} {t(CONSENT)}</p></> })
+            .then((ok) => void (ok && confirmNode(url)))}>{t('Use on this device')}</button>)}
         {issue?.why === 'sign-in' && issue.node && <button className="link" onClick={() => void signInWindow(issue.node!).catch(toastError)}>{t('Sign in')}</button>}
         {inst?.status === 'cut-off' && <button className="link" onClick={() => reconnectNode(inst.id)}>{t('Reconnect')}</button>}
         {saved && <button className="link" onClick={() => copy(saved)}>{t('Copy add link')}</button>}
@@ -123,10 +133,10 @@ export function PrivateNodes() {
 export function AddNodePage() {
   const [url] = useState(() => parseAddLink(location.hash))
   const [info, setInfo] = useState<{ name: string } | null>(null)
-  const [error, setError] = useState(url ? '' : t('This link does not contain a usable node address.'))
+  const [error, setError] = useState(!url ? t('This link does not contain a usable node address.') : isPrivateAddress(url) ? t(REFUSED.private) : '')
   const [added, setAdded] = useState(false)
   const [busy, setBusy] = useState(false)
-  useEffect(() => void (url && testNode(url).then(setInfo, () => setError(t('Could not connect to node at this address.')))), [url])
+  useEffect(() => void (url && !isPrivateAddress(url) && testNode(url).then(setInfo, () => setError(t('Could not connect to node at this address.')))), [url])
 
   const confirm = () => {
     setBusy(true)

@@ -1,7 +1,7 @@
 // Saved private nodes and add links (src/privateNodes.ts). Run: npm test (node strips the TypeScript types).
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { addLink, addNode, cleanName, MAX_NODES, normalizeServerUrl, parseAddLink, parseNodes, tokenFor, keepSignIn, revocations, inSession } from '../src/privateNodes.ts'
+import { addLink, addNode, cleanName, isPrivateAddress, MAX_NODES, normalizeServerUrl, parseAddLink, parseNodes, tokenFor, keepSignIn, revocations, inSession } from '../src/privateNodes.ts'
 
 test('addresses become origins; http only for localhost', () => {
   assert.equal(normalizeServerUrl('chat.example.org/'), 'https://chat.example.org')
@@ -12,6 +12,15 @@ test('addresses become origins; http only for localhost', () => {
   assert.equal(normalizeServerUrl('bücher.example', true), 'https://xn--bcher-kva.example') // shown as punycode
   for (const bad of ['http://chat.example.org', 'ftp://a.b', ' ', 'javascript:alert(1)', 'https://', 'https://a b.org'])
     assert.equal(normalizeServerUrl(bad, true), null, bad)
+})
+
+test('round 7 (A-R7-9): this computer and private networks are told apart from public nodes', () => {
+  for (const o of ['http://localhost:4700', 'http://a.localhost', 'http://127.0.0.1:3988', 'https://127.1', 'https://2130706433', 'https://0x7f.1', 'http://[::1]:80',
+    'https://10.0.0.5', 'https://172.16.1.1', 'https://172.31.255.255', 'https://192.168.1.10', 'https://169.254.169.254', 'https://100.64.0.1', 'https://0.0.0.0',
+    'https://[fd00::1]', 'https://[fe80::1]', 'https://[::ffff:127.0.0.1]', 'https://nas', 'https://printer.local', 'https://git.internal', 'https://router.lan', 'https://x.home.arpa', 'https://localhost.'])
+    assert.ok(isPrivateAddress(o), o)
+  for (const o of ['https://chat.example.org', 'https://n1.example', 'https://8.8.8.8', 'https://172.32.0.1', 'https://192.169.0.1', 'https://[2001:db8::1]', 'https://xn--bcher-kva.example'])
+    assert.ok(!isPrivateAddress(o), o)
 })
 
 test('strict: only an origin, no path, query, fragment or user info', () => {

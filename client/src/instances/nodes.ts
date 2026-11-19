@@ -8,7 +8,7 @@ import { createGateway, type Gateway } from '../gateway'
 import { t } from '../i18n'
 import { notifyEvent } from '../notifications/notify'
 import { navigate } from '../router'
-import { gatewayOk, inSession, keepSignIn, MAX_NODES, normalizeServerUrl, revocations } from '../privateNodes'
+import { gatewayOk, inSession, isPrivateAddress, keepSignIn, MAX_NODES, normalizeServerUrl, revocations } from '../privateNodes'
 import { apply, byId, getState, setState, setToken, type State } from '../store'
 import type { GuildPayload, Presence, ReadState, User, UserGuildSettings } from '../types'
 import { leaveVoice, voiceDropped, voiceEvent } from '../voice/engine'
@@ -343,6 +343,29 @@ const tries = new Map<string, number>() // origin -> failed tries in a row
 const timers = new Map<string, ReturnType<typeof setTimeout>>()
 const busy = new Set<string>() // origins with a sign-in under way (READY, the settings echo and an add can all ask at once)
 const OWN_LOGIN = 'own-login'
+// Round 7 (A-R7-9): the account's list (pushed by the hub) only proposes nodes; one becomes active on this device once
+// the user confirmed it here, with its address shown in full. Kept per hub account; loopback and private-network
+// addresses only when typed in on this device.
+export const CONFIRM = 'confirm'
+const CONFIRMED_KEY = 'cillhub_confirmed_nodes'
+const owner = () => `${apiOrigin()} ${getState().me?.id ?? ''} `
+const confirmedHere = (): string[] => {
+  try { const v = JSON.parse(localStorage.getItem(CONFIRMED_KEY) ?? '[]'); return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [] } catch { return [] }
+}
+export const isConfirmed = (origin: string) => confirmedHere().includes(owner() + origin)
+const setConfirmed = (origin: string, on: boolean) => {
+  const rest = confirmedHere().filter((x) => x !== owner() + origin)
+  try { localStorage.setItem(CONFIRMED_KEY, JSON.stringify(on ? [...rest, owner() + origin].slice(-100) : rest)) } catch { /* storage off: asked again next time */ }
+}
+/** "Use on this device" on a node the account lists: false for an address that must be typed in here. */
+export function confirmNode(origin: string): boolean {
+  if (isPrivateAddress(origin) || !savedNodes().some((n) => n.origin === origin)) return false
+  setConfirmed(origin, true)
+  tries.delete(origin)
+  setIssue(origin, null)
+  void connectSaved(origin)
+  return true
+}
 
 // The hub session as stored (all tabs share it): a logout or login in any tab ends what this tab started before.
 const session = () => localStorage.getItem('token') ?? ''
@@ -378,6 +401,7 @@ async function connectSaved(only?: string) {
   const records = await listNodes().catch(() => null)
   for (const n of savedNodes()) {
     if (only && n.origin !== only) continue
+    if (!isConfirmed(n.origin)) { setIssue(n.origin, { why: CONFIRM }); continue } // no sign-in, no request to it
     if (!records) { retry(n.origin, t("Can't reach the server.")); continue }
     void connectOne(n.origin, records)
   }
@@ -458,12 +482,14 @@ async function signInQuietly(node: InstanceInfo, live: () => boolean): Promise<s
 
 /** Adds a node to the account's list and connects it; the refusal reason when it cannot be added. */
 /** `started`: the session the user began adding in (before the address check and the dialog); 'cancelled' when it ended. */
-export async function addPrivateNode(origin: string, name: string, started: string): Promise<'invalid' | 'duplicate' | 'full' | 'cancelled' | null> {
+export async function addPrivateNode(origin: string, name: string, started: string, typed = false): Promise<'invalid' | 'duplicate' | 'full' | 'cancelled' | 'private' | null> {
   if (session() !== started) return 'cancelled'
+  if (!typed && isPrivateAddress(origin)) return 'private' // an add link may not name this computer or the local network
   const fresh = getState().settings.private_nodes ?? savedNodes()
   if (fresh.some((n) => n.origin === origin)) return 'duplicate'
   if (fresh.length >= MAX_NODES) return 'full'
   const first = getState().settings.private_nodes == null && fresh.length ? [() => changeNodes('/initial', 'PUT', { nodes: fresh })] : [] // first list of this account
+  setConfirmed(origin, true) // added here by the user: this device uses it
   if (!(await inSession(started, session, [...first, () => changeNodes('', 'PUT', { origin, name })]))) return 'cancelled'
   tries.delete(origin) // the gateway's list update connects it
   return null
@@ -493,6 +519,7 @@ function forget(origin: string, signOut = false) {
   timers.delete(origin)
   tries.delete(origin)
   setIssue(origin, null)
+  if (signOut) setConfirmed(origin, false)
   if (signOut) for (const i of instances()) if (i.url === origin) disconnectInstance(i.id)
 }
 

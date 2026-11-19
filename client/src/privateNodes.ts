@@ -148,3 +148,21 @@ export function gatewayOk(nodeUrl: string, gateway: string) {
 
 /** An API path whose segments cannot walk elsewhere once the URL is resolved (`..`, `.`, encoded slashes or dots, backslashes). */
 export const safePath = (path: string) => !path.split('?')[0].split('/').some((seg) => seg === '.' || seg === '..' || /%2e|%2f|%5c|\\/i.test(seg))
+
+/** Round 7 (A-R7-9): an address on this computer or in a private network (loopback, RFC 1918, link-local, CGNAT, ULA,
+ *  single-label and .local/.internal/.lan names). Such a node is used only when typed in on this device, never from the
+ *  account's list or an add link. shortcut: a public name that resolves to a private address is not seen here (DNS). */
+export function isPrivateAddress(origin: string): boolean {
+  let h: string
+  try { h = new URL(origin).hostname.toLowerCase().replace(/\.$/, '') } catch { return true }
+  if (h.startsWith('[')) {
+    const x = h.slice(1, -1)
+    return x === '::1' || x === '::' || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || x.startsWith('::ffff:') || x.startsWith('64:ff9b:')
+  }
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h)
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])]
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) || a >= 224
+  }
+  return !h.includes('.') || /\.(localhost|local|internal|lan|home\.arpa|intranet|corp)$/.test(h)
+}

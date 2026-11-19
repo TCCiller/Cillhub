@@ -822,7 +822,7 @@ function mutedByServer(why: 'moved' | 'invited') {
   if (!getState().voice.selfMute) setSelfMute(true)
   toast(why === 'moved'
     ? t('You were moved to another voice channel. Your microphone is muted; unmute when you are ready.')
-    : t('You were invited to speak. Your microphone is muted; unmute when you are ready.'))
+    : t('You can speak now. Your microphone stays off until you unmute.'), { label: t('Unmute'), run: () => setSelfMute(false) })
 }
 
 /** Gateway hook: called after the store applied each dispatch; `from` = the node it came from (undefined: the primary

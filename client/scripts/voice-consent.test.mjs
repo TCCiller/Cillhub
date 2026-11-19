@@ -77,6 +77,19 @@ test('media endpoints: cillvoice or the connection\'s own host', () => {
   assert.equal(mediaUrl('wss://x', ''), null) // no known origin
 })
 
+test('the production hub passes the endpoint rule: its LiveKit and the built-in voice (cillvoice)', () => {
+  // /root/cillcord-prod compose: CILLCORD_PUBLIC_URL https://cillhub.cillerian.org, LIVEKIT_PUBLIC_URL wss://cillhub.cillerian.org/livekit
+  const site = 'https://cillhub.cillerian.org'
+  const lk = mediaUrl('wss://cillhub.cillerian.org/livekit', site)
+  assert.equal(lk, 'wss://cillhub.cillerian.org/livekit') // same host, wss, default port, path kept
+  assert.equal(mediaHost(lk), 'cillhub.cillerian.org') // a reconnect compares this host: unchanged between answers
+  assert.equal(mediaUrl('cillvoice', site), 'cillvoice')
+  assert.equal(mediaHost('cillvoice'), 'cillvoice')
+  // the old alias jeopardy.cillerian.org serves the same site: a page loaded there gets the cillhub host and is refused
+  assert.equal(mediaUrl('wss://cillhub.cillerian.org/livekit', 'https://jeopardy.cillerian.org'), null)
+  assert.equal(mediaUrl('cillvoice', 'https://jeopardy.cillerian.org'), 'cillvoice')
+})
+
 // ---------- round 7 ----------
 test('READY never makes a join: only a call connected when the gateway dropped comes back (A-R7-3b, C-R7-1)', () => {
   const was = { guildId: 'g', channelId: 'v1', host: 'chat.example:7880', mic: true }

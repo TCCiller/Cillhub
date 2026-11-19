@@ -254,7 +254,7 @@ export type View = {
   user: (id: string) => object | undefined
   channel: (id: string) => { guild_id?: string | null } | undefined
   /** The interaction we sent with this nonce and not yet answered: channel, application, interaction type. */
-  interaction: (nonce: unknown) => { channelId: string; appId: string; type: number } | undefined
+  interaction: (nonce: unknown) => { channelId: string; appId: string; type: number; at?: number } | undefined
   /** Forgets it (a terminal answer arrived). */
   consume: (nonce: string) => void
   voiceGuild: () => string | null | undefined
@@ -306,13 +306,39 @@ function allowed(inst: string, t: string, d: any): boolean {
     const p = view.interaction(d.nonce)
     if (!p || !mine(inst, p.channelId) || (d.channel_id != null && d.channel_id !== p.channelId)) return false
     if (t === 'APPLICATION_COMMAND_AUTOCOMPLETE_RESPONSE' ? p.type !== 4 : p.type === 4) return false
-    if (t === 'INTERACTION_MODAL_CREATE' && (p.type === 5 || !Array.isArray(d.components))) return false
+    if (t === 'INTERACTION_MODAL_CREATE' && (!modalFresh(p) || !Array.isArray(d.components))) return false
     d.channel_id = p.channelId
     if (t === 'INTERACTION_MODAL_CREATE') d.application = { ...(d.application && typeof d.application === 'object' ? d.application : {}), id: p.appId }
     if (TERMINAL.has(t)) view.consume(d.nonce)
     return true
   }
   return false
+}
+
+// A form (INTERACTION_MODAL_CREATE) answers only a command or button the user used on this device a moment ago (an
+// application answers within 3 s; round 7, A-R7-6).
+export const MODAL_MS = 10_000
+const modalFresh = (p: { type: number; at?: number }) => p.type !== 4 && p.type !== 5 && typeof p.at === 'number' && Date.now() - p.at < MODAL_MS
+
+/** A primary-server (hub) event as the store may apply it, or null to drop it (round 7, A-R7-4, A-R7-6, A-R7-8). Every
+ *  event is applied only to state of the connection it came on: scoped ids (`<node>~<id>`) are made on this device for
+ *  a node's objects, so a hub event naming one is forged. A form only answers an interaction this device sent into a
+ *  hub channel a moment ago; where it shows and which application it names come from that request. */
+export function hubAdmit<T>(t: string, d: T): T | null {
+  if (namesNode(d, 0)) return null
+  if (t !== 'INTERACTION_MODAL_CREATE') return d
+  const m = d as any
+  const p = view.interaction(m?.nonce)
+  if (!p || nodeOf(p.channelId) !== undefined || !modalFresh(p) || !Array.isArray(m.components) || (m.channel_id != null && m.channel_id !== p.channelId)) return null
+  view.consume(m.nonce)
+  return { ...m, channel_id: p.channelId, application: { ...(m.application && typeof m.application === 'object' ? m.application : {}), id: p.appId } }
+}
+/** Whether a hub payload names a node's object: an id key, id list or map key holding a scoped id. */
+function namesNode(x: unknown, depth: number, key = ''): boolean {
+  if (depth > LIMITS.depth || x === null || typeof x !== 'object') return typeof x === 'string' && (isIdKey(key) || USER_ID_KEYS.has(key) || isIdList(key)) && nodeOf(x) !== undefined
+  if (FREE_TREES.has(key)) return false
+  if (Array.isArray(x)) return x.some((v) => namesNode(v, depth + 1, key))
+  return Object.entries(x).some(([k, v]) => nodeOf(k) !== undefined || namesNode(v, depth + 1, k))
 }
 
 /** A node gateway event (or READY) as the store may apply it, or null to drop it. READY starts the node's id budget anew. */

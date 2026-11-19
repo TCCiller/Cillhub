@@ -692,6 +692,7 @@ export function apply(t: string, d: any) {
     case 'APPLICATION_COMMAND_AUTOCOMPLETE_RESPONSE':
       return setState({ autocomplete: { nonce: d.nonce, channelId: d.channel_id, choices: d.choices ?? [] } })
     case 'INTERACTION_MODAL_CREATE':
+      // the connection's boundary (registry.ts hubAdmit / admit) let it through: an answer to our own interaction
       return setState({ modal: { kind: 'interaction-modal', data: d }, ...(d.nonce && s.interactions[d.nonce] && { interactions: omit(s.interactions, d.nonce) }) })
     // ---------- v5 ----------
     case 'WATCH_SESSION_UPDATE':

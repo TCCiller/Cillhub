@@ -9,7 +9,7 @@ import { has, isStageModerator, P } from '../permissions'
 import { memberName, usePerms } from '../selectors'
 import { setState, useStore } from '../store'
 import type { Channel, Guild, VoiceState } from '../types'
-import { joinVoice, leaveVoice, setSelfMute } from '../voice/engine'
+import { intendSpeak, joinVoice, leaveVoice, setSelfMute } from '../voice/engine'
 import { VoiceError } from '../voice/VoicePanel'
 import { VoiceIcons } from '../voice/VoiceUsers'
 import { useVoiceChat, VoiceChatPane } from '../voice/VoiceView'
@@ -64,7 +64,7 @@ export function StageView({ channel, guild }: { channel: Channel; guild: Guild }
   const end = () =>
     void ask({ title: t('End Stage'), body: <p>{t('Everyone will be moved to the audience and the topic will be cleared.')}</p>, confirm: t('End Stage'), danger: true })
       .then((ok) => void (ok && endStage(channel.id).catch(fail)))
-  const self = (body: Parameters<typeof setMyStageState>[2]) => setMyStageState(guild.id, channel.id, body).catch(fail)
+  const self = (body: Parameters<typeof setMyStageState>[2]) => (body.suppress === false && intendSpeak(), setMyStageState(guild.id, channel.id, body).catch(fail))
 
   return (
     <main className="chat voice-view stage-view" aria-label={t('Stage channel {name}', { name: channel.name ?? '' })}>
@@ -176,7 +176,7 @@ export function StartStageModal({ channelId, onClose }: { channelId: string; onC
   const guildId = channel.guild_id
   const start = () =>
     createStage(channelId, topic.trim()).then(async () => {
-      if (here) await setMyStageState(guildId, channelId, { suppress: false }).catch(() => {})
+      if (here) (intendSpeak(), await setMyStageState(guildId, channelId, { suppress: false }).catch(() => {}))
       else joinVoice(guildId, channelId)
       onClose()
     }, (e: Error) => setError(e.message))

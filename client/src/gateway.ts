@@ -3,10 +3,10 @@ import { toast } from './components/dialogs'
 import { t } from './i18n'
 import { apply, getState, setState, setToken } from './store'
 import { notifyEvent } from './notifications/notify'
-import { voiceEvent } from './voice/engine'
+import { voiceDropped, voiceEvent } from './voice/engine'
 import { soundEvent } from './custom/sounds'
 import { forgetInstances, nodeSend, startNodes, stopNodes, syncPrivateNodes } from './instances/nodes'
-import { nodeOf, setHubIdentity } from './instances/registry'
+import { hubAdmit, nodeOf, setHubIdentity } from './instances/registry'
 
 export type Gateway = { connect: () => void; disconnect: () => void; send: (op: number, d: unknown) => boolean }
 type Options = {
@@ -24,6 +24,8 @@ type Options = {
   presence?: (p: unknown) => unknown
   /** The backoff starts over only once a connection stayed up this long after READY (node gateways); else at READY. */
   steady?: number
+  /** The session is gone (socket closed, or op 9): the next READY is a new session (voice: what may come back). */
+  dropped?: () => void
 }
 
 const send = (sock: WebSocket, op: number, d: unknown) => sock.readyState === WebSocket.OPEN && (sock.send(JSON.stringify({ op, d })), true)
@@ -115,7 +117,7 @@ export function createGateway(o: Options): Gateway {
       else if (op === 1) send(sock, 1, seq)
       // v1 cannot resume; the protocol asks for a fresh IDENTIFY after a random 1-5 s wait.
       // One pending re-identify at a time, however many op 9 arrive.
-      else if (op === 9 && !reidentify) reidentify = setTimeout(() => ((reidentify = 0), gen === generation && identify(sock, o.token(), o.presence)), 1000 + Math.random() * 4000)
+      else if (op === 9 && !reidentify) o.dropped?.(), reidentify = setTimeout(() => ((reidentify = 0), gen === generation && identify(sock, o.token(), o.presence)), 1000 + Math.random() * 4000)
       else if (op === 0) {
         if (t === 'READY' && !o.steady) attempt = 0
         else if (t === 'READY') (clearTimeout(steady), (steady = setTimeout(() => gen === generation && (attempt = 0), o.steady)))
@@ -124,6 +126,7 @@ export function createGateway(o: Options): Gateway {
     }
     sock.onclose = (e) => {
       if (sock !== ws) return
+      o.dropped?.()
       clearInterval(heartbeat)
       clearTimeout(reidentify)
       clearTimeout(steady)
@@ -142,12 +145,15 @@ const hub = createGateway({
   ready: () => getState().status === 'ready',
   connecting: () => setState({ status: 'connecting' }),
   rejected: () => logout(),
-  dispatch(t, d) {
+  dropped: () => voiceDropped(),
+  dispatch(t, raw) {
+    // round 7: what the hub sends is applied only to the hub's own state, and a form only answers our own interaction
+    const d = hubAdmit(t, raw)
+    if (!d) return void console.warn(`hub: dropped a ${t} naming another server's objects or answering nothing we sent`)
     if (t === 'READY') setHubIdentity(d.user.id, d.session_id)
     const before = getState()
     apply(t, d)
-    // A hub reconnect says nothing about a call on a node server (that node's own READY does).
-    if (!(t === 'READY' && nodeOf(getState().voice.guildId))) voiceEvent(t, d)
+    voiceEvent(t, d) // a hub event never touches a call on a node server (the engine checks the connection)
     notifyEvent(t, d)
     soundEvent(t, d, before)
     if (t === 'READY') startNodes() // node payloads are aliased to our hub identity, so they wait for it

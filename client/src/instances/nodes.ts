@@ -11,7 +11,7 @@ import { navigate } from '../router'
 import { gatewayOk, inSession, keepSignIn, MAX_NODES, normalizeServerUrl, revocations } from '../privateNodes'
 import { apply, byId, getState, setState, setToken, type State } from '../store'
 import type { GuildPayload, Presence, ReadState, User, UserGuildSettings } from '../types'
-import { leaveVoice, voiceEvent } from '../voice/engine'
+import { leaveVoice, voiceDropped, voiceEvent } from '../voice/engine'
 import { admit, newConnection, NODE_MAPS, outbound, presenceFor, overBudget, pruneNode, scoped, instanceById, instances, nodeOf, removeInstance, saveInstance, sessionOf, setIssue, setLive, setView, tokenOf, type InstanceInfo } from './registry'
 
 /** The hub's node directory record (§2), from GET /federation/nodes. */
@@ -71,6 +71,7 @@ function open(i: InstanceInfo) {
     token: () => tokenOf(i.id),
     ready: () => statusOf(i.id) === 'ready',
     connecting: (failed) => (newConnection(i.id), setLive(i.id, { status: failed ? 'offline' : 'connecting' })),
+    dropped: () => voiceDropped(i.id),
     // The node ends our sessions when the hub suspends, bans or unlinks it: ask the hub which it is. A saved private node
     // gets a new background sign-in (with backoff).
     rejected: () => (close(i.id), setLive(i.id, { status: 'signed-out' }), void refreshStatus(), savedNodes().some((n) => n.origin === i.url) && retry(i.url, t('Signed out'))),
@@ -136,7 +137,7 @@ function handle(id: string, t: string, raw: any) {
   apply(t, d)
   keepHubSelf(s)
   if (t === 'GUILD_DELETE') dropNodeState(id) // its members leave unless another server of the node still has them
-  voiceEvent(t, d)
+  voiceEvent(t, d, id)
   notifyEvent(t, d)
   soundEvent(t, d, s)
 }
@@ -184,7 +185,7 @@ function ready(id: string, d: { guilds?: GuildPayload[]; users?: User[]; presenc
   keepHubSelf(before)
   setLive(id, { status: 'ready' })
   // A call on this node's server survives a node reconnect the same way a hub call survives a hub reconnect.
-  if (nodeOf(getState().voice.guildId) === id) voiceEvent('READY', d)
+  if (nodeOf(getState().voice.guildId) === id) voiceEvent('READY', d, id)
 }
 
 let polling = 0

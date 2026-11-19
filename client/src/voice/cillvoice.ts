@@ -258,13 +258,19 @@ class Session {
   }
 
   // ---- microphone ----
+  micOpening: Promise<void> | null = null
   async micTrack() {
     if (!this.local.microphone || this.local.microphone.readyState === 'ended') {
-      const chId = getState().voice.channelId
-      const hifi = Boolean(chId && getState().channels[chId]?.quality_mode === 'hifi')
-      const m = await withMic(() => navigator.mediaDevices.getUserMedia({ audio: captureConstraints(voiceSettings(), undefined, hifi) }))
-      this.local.microphone = m.getAudioTracks()[0]
-      await this.process()
+      // one capture at a time (a second caller would leave the first track capturing), none kept after close
+      this.micOpening ??= (async () => {
+        const chId = getState().voice.channelId
+        const hifi = Boolean(chId && getState().channels[chId]?.quality_mode === 'hifi')
+        const m = await withMic(() => navigator.mediaDevices.getUserMedia({ audio: captureConstraints(voiceSettings(), undefined, hifi) }))
+        if (this.closed) throw (stopTracks(m), new Error('closed'))
+        this.local.microphone = m.getAudioTracks()[0]
+        await this.process()
+      })().finally(() => (this.micOpening = null))
+      await this.micOpening
     }
     return this.proc?.processedTrack ?? this.local.microphone!
   }

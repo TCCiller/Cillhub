@@ -1,4 +1,4 @@
-import { nodeOf, nodeUserId } from '../instances/registry'
+import { instanceById, nodeOf, nodeUserId } from '../instances/registry'
 import { joins } from './join'
 // LiveKit identities of a node's room are that node's user ids: scoped (ours → our hub id) before any map key or tile.
 let roomNode: string | undefined
@@ -22,6 +22,7 @@ import * as cv from './cillvoice'
 import { micHooks, withMic } from './settings'
 import { installStartBitrateHint } from './startBitrate'
 import { toast } from '../components/dialogs'
+import { afkMayMove, intentFor, mediaHost, mediaUrl, moveVerdict, readyVerdict, serverUpdateAllowed, soundAllowed, speakGate, type Intent, type Restorable } from './consent'
 
 let lk: typeof import('livekit-client') | null = null
 let room: Room | null = null
@@ -39,7 +40,7 @@ Object.assign(cv.hooks, {
   bump, audioBox,
   onConnected: () => (setVoice({ status: 'connected' }), void syncMic(), bump()),
   onReconnecting: () => setVoice({ status: 'connecting' }),
-  onLost: () => setVoice({ status: 'error', error: 'Lost the voice connection.' }),
+  onLost: () => lost(),
   // the browser's own "Stop sharing" button
   onScreenEnded: () => getState().voice.stream && (setVoice({ stream: false }), sendState(), void cv.stopScreen().then(bump)),
 })
@@ -56,6 +57,37 @@ function sendState() {
   sendOp(4, { guild_id: v.guildId, channel_id: v.channelId, self_mute: v.selfMute || v.selfDeaf, self_deaf: v.selfDeaf, self_video: v.video, self_stream: v.stream })
 }
 
+// A server's VOICE_SERVER_UPDATE is followed only for a join started on this device (this intent) or the call it became
+// (voice/consent.ts): a server cannot open a media connection, and so the microphone, by itself.
+let intent: Intent | null = null
+const intend = (guildId: string | null, channelId: string) => void (intent = intentFor(guildId, channelId, Date.now()))
+let speakUntil = 0
+/** "Become a Speaker" / starting a stage: our own promotion, not muted on arrival. */
+export const intendSpeak = () => void (speakUntil = Date.now() + 15_000)
+
+// Round 7: the microphone never turns on because a server gave speaking back (stage invite, SPEAK granted, server mute
+// lifted, our voice state in READY or GUILD_CREATE): `heldBack` is set while the server does not let us speak and stays
+// until the user unmutes or joins; the server giving it back mutes us and asks (gate below).
+let heldBack = false
+let prompted = false
+// A reconnect may restore only a call that was connected when its gateway dropped (snapshot taken then; undefined = no drop
+// seen since the last READY), to the same channel and media host, with the microphone as it was.
+let dropped: Restorable | null | undefined
+let rejoinHost: string | null = null
+// when the media connection of the call was lost: the server ends it when our gateway closes, maybe before we see the close
+let lostAt = 0
+let micAtLoss = false
+const restorable = (): Restorable | null => {
+  const v = getState().voice
+  const ok = v.status === 'connected' || (v.status === 'error' && Date.now() - lostAt < 5000)
+  return ok && last && v.channelId ? { guildId: v.guildId, channelId: v.channelId, host: mediaHost(last.endpoint), mic: v.status === 'connected' ? micWanted() : micAtLoss } : null
+}
+const lost = () => ((lostAt = Date.now()), (micAtLoss = micWanted()), setVoice({ status: 'error', error: 'Lost the voice connection.' }))
+/** Gateway hook: the connection `from` (undefined = the primary server) dropped or was told to identify again. */
+export function voiceDropped(from?: string) {
+  if (from === nodeOf(getState().voice.guildId) && dropped === undefined) dropped = restorable()
+}
+
 let ringOnJoin: string | null = null
 /** Joins a guild voice channel, or a DM / group DM call with `guildId` null (CONTRACT-v4); `ring` rings the others once we are in. */
 export function joinVoice(guildId: string | null, channelId: string, opts: { ring?: boolean } = {}) {
@@ -63,6 +95,10 @@ export function joinVoice(guildId: string | null, channelId: string, opts: { rin
   const v = getState().voice
   if (v.channelId === channelId && v.status !== 'error') return
   teardown() // the server moves our single voice state; the new room comes with VOICE_SERVER_UPDATE
+  heldBack = prompted = false
+  dropped = undefined
+  rejoinHost = null
+  intend(guildId, channelId)
   const s = voiceSettings()
   setVoice({ guildId, channelId, status: 'waiting', error: '', selfMute: s.selfMute, selfDeaf: s.selfDeaf, video: false, stream: false })
   sendState()
@@ -74,21 +110,30 @@ let joinTimer = 0
 function waitForServer() {
   clearTimeout(joinTimer)
   joinTimer = setTimeout(() => {
-    if (getState().voice.status === 'waiting') setVoice({ status: 'error', error: "Couldn't join the voice channel." })
+    if (getState().voice.status === 'waiting') (intent = null), setVoice({ status: 'error', error: "Couldn't join the voice channel." })
   }, 5000)
 }
 
 export function leaveVoice() {
   const v = getState().voice
   if (v.channelId) sendOp(4, { guild_id: v.guildId, channel_id: null, self_mute: v.selfMute, self_deaf: v.selfDeaf })
-  teardown()
+  endCall()
   setVoice({ ...idleVoice, selfMute: v.selfMute, selfDeaf: v.selfDeaf })
+}
+/** The call is over (left, ended by the server, logout): nothing of it may come back. */
+function endCall() {
+  teardown()
+  heldBack = prompted = false
+  dropped = undefined
+  rejoinHost = null
 }
 
 const join = joins()
 function teardown() {
   join.bump() // a LiveKit join still loading or connecting is stale now
   clearTimeout(joinTimer)
+  intent = null
+  lostAt = 0
   const r = room
   room = null
   last = null
@@ -100,14 +145,6 @@ function teardown() {
   }
 }
 
-/** LiveKit endpoint as a ws(s) URL; accepts full URLs, bare hosts and root-relative paths. */
-function wsUrl(endpoint: string) {
-  if (/^wss?:\/\//.test(endpoint)) return endpoint
-  if (/^https?:\/\//.test(endpoint)) return endpoint.replace(/^http/, 'ws')
-  const base = new URL(apiOrigin())
-  const scheme = base.protocol === 'https:' ? 'wss://' : 'ws://'
-  return endpoint.startsWith('/') ? scheme + base.host + endpoint : scheme + endpoint
-}
 
 // Remote voices play through Web Audio (needed for volumes above 100 %). livekit-client's own context uses the smallest
 // buffer ('interactive'), which runs dry and crackles like static on a busy PC (a game running); 'playback' buffers more
@@ -171,12 +208,12 @@ async function connectRoom(endpoint: string, token: string) {
     })
     .on(RoomEvent.Reconnecting, () => live() && setVoice({ status: 'connecting' }))
     .on(RoomEvent.Reconnected, () => live() && setVoice({ status: 'connected' }))
-    .on(RoomEvent.Disconnected, () => live() && setVoice({ status: 'error', error: 'Lost the voice connection.' }))
+    .on(RoomEvent.Disconnected, () => live() && lost())
     .on(RoomEvent.MediaDevicesError, (e: Error) => live() && setVoice({ error: `Device error: ${e.message}` }))
     // Stage: the server grants the microphone when we become a speaker; publish once the grant arrives.
     .on(RoomEvent.ParticipantPermissionsChanged, (_prev: unknown, p: Participant) => live() && p === r.localParticipant && void syncMic())
   try {
-    await r.connect(wsUrl(endpoint), token)
+    await r.connect(endpoint, token) // already a ws(s) URL (mediaUrl)
   } catch (e) {
     if (live()) setVoice({ status: 'error', error: `Could not connect to voice${e instanceof Error && e.message ? `: ${e.message}` : '.'}` })
     return
@@ -221,7 +258,7 @@ async function dropAv1(r: Room) {
 export function retryVoice() {
   const v = getState().voice
   if (last) return void connectRoom(last.endpoint, last.token)
-  if (v.channelId) (setVoice({ status: 'waiting', error: '' }), sendState(), waitForServer())
+  if (v.channelId) (intend(v.guildId, v.channelId), setVoice({ status: 'waiting', error: '' }), sendState(), waitForServer())
 }
 
 const deafened = () => getState().voice.selfDeaf || !!myState()?.deaf
@@ -236,18 +273,31 @@ function applyVolume(p: RemoteParticipant) {
   p.setVolume(streamVol, 'screen_share_audio' as Track.Source.ScreenShareAudio)
 }
 
-/** Whether the microphone should be sending now. */
-function micWanted() {
+/** Whether the server lets us speak in our channel: SPEAK, no server mute or deafen; on a stage only as a speaker
+ *  (our voice state says suppress false; unknown counts as audience). */
+function serverAllows() {
   const v = getState().voice
   const ch = v.channelId ? getState().channels[v.channelId] : undefined
   const st = myState()
-  // Stage audience members (suppress) never publish; the server's grant enforces it too.
-  const allowed = has(permsOf(getState(), v.guildId ?? undefined, ch), P.SPEAK) && !st?.mute && !st?.deaf && !st?.suppress
-  return allowed && !v.selfMute && !v.selfDeaf && (voiceSettings().mode === 'vad' || pttDown)
+  return has(permsOf(getState(), v.guildId ?? undefined, ch), P.SPEAK) && !st?.mute && !st?.deaf && (ch?.type === 13 ? st?.suppress === false : !st?.suppress)
+}
+/** Whether the microphone should be sending now. */
+function micWanted() {
+  const v = getState().voice
+  return serverAllows() && !heldBack && !v.selfMute && !v.selfDeaf && (voiceSettings().mode === 'vad' || pttDown)
+}
+/** Speaking given back by the server (any event) never opens the microphone: muted, and the user is asked. */
+function gate() {
+  if (!getState().voice.channelId) return
+  const g = speakGate({ held: heldBack, prompted }, serverAllows(), speakUntil, Date.now())
+  heldBack = g.held
+  prompted = g.prompted
+  if (g.prompt) mutedByServer('invited')
 }
 
 /** Publishes or mutes the microphone to match self mute/deafen, server mute/deafen, SPEAK and push-to-talk. */
 async function syncMic() {
+  gate()
   const r = room
   const v = getState().voice
   if (cv.active() && v.status === 'connected') {
@@ -274,6 +324,7 @@ export function setSelfMute(mute: boolean) {
   const v = getState().voice
   // Unmuting while deafened undeafens too.
   const patch = { selfMute: mute, selfDeaf: mute ? v.selfDeaf : false }
+  if (!mute) heldBack = prompted = false // the user's own unmute: what the server allows now may be sent
   if (v.channelId) playKind(v.selfDeaf && !mute ? 'deafen' : 'mute', mute)
   saveVoiceSettings(patch)
   setVoice(patch)
@@ -287,6 +338,7 @@ export function setSelfDeaf(deaf: boolean) {
   const v = getState().voice
   if (deaf && !v.selfDeaf) mutedBeforeDeaf = v.selfMute
   const patch = { selfDeaf: deaf, selfMute: deaf || (v.selfDeaf ? mutedBeforeDeaf : v.selfMute) }
+  if (!patch.selfMute) heldBack = prompted = false
   if (v.channelId && deaf !== v.selfDeaf) playKind('deafen', deaf)
   saveVoiceSettings(patch)
   setVoice(patch)
@@ -664,14 +716,25 @@ setInterval(() => {
   const v = s.voice
   if (s.me && v.speaking[s.me.id]) return active()
   const g = v.guildId ? s.guilds[v.guildId] : undefined
-  if (!g?.afk_channel_id || !v.channelId || v.channelId === g.afk_channel_id || v.status === 'idle') return
+  // round 7 (T-R7-1): only from a call that is connected; a failed or waiting join is no call to move
+  if (!g?.afk_channel_id || !v.channelId || v.channelId === g.afk_channel_id || !afkMayMove(v.status, !!last)) return
   if (Date.now() - lastActive >= (g.afk_timeout ?? 300) * 1000) {
     active()
     // the server ignores a join it does not allow, and leaving first would drop us from a working call
     const afk = s.channels[g.afk_channel_id]
-    if (afk && canJoinVoice(s, g.id, afk)) joinVoice(g.id, g.afk_channel_id)
+    if (afk && canJoinVoice(s, g.id, afk)) afkMove(g.id, g.afk_channel_id)
   }
 }, 5000)
+
+/** The AFK move is a server move (channel and timeout are the server's): muted on arrival, no permission window. */
+function afkMove(guildId: string, channelId: string) {
+  mutedByServer('moved')
+  teardown()
+  intend(guildId, channelId) // its answer is followed; the microphone stays muted
+  setVoice({ channelId, status: 'waiting', error: '', video: false, stream: false })
+  sendState()
+  waitForServer()
+}
 
 // Volumes are kept by our user ids; a node room's identities are that node's ids (userOf maps them).
 const participantOf = (userId: string) => (room ? [...room.remoteParticipants.values()].find((p) => userOf(p) === userId) : undefined)
@@ -754,54 +817,100 @@ addEventListener('blur', () => {
   if (pttDown) (pttDown = false), void syncMic()
 })
 
-/** Gateway hook: called after the store applied each dispatch. */
-export function voiceEvent(t: string, d: any) {
+/** Mutes us after the server changed our call (a move, a stage promotion): the user unmutes when ready. */
+function mutedByServer(why: 'moved' | 'invited') {
+  if (!getState().voice.selfMute) setSelfMute(true)
+  toast(why === 'moved'
+    ? t('You were moved to another voice channel. Your microphone is muted; unmute when you are ready.')
+    : t('You were invited to speak. Your microphone is muted; unmute when you are ready.'))
+}
+
+/** Gateway hook: called after the store applied each dispatch; `from` = the node it came from (undefined: the primary
+ *  server's connection). Round 7: every event about our call counts only from the connection the call is on; a hub event
+ *  never touches a node call, nor a node event a hub call. */
+export function voiceEvent(t: string, d: any, from?: string) {
   const s = getState()
   const v = s.voice
+  if (t === 'LOGOUT') return void (endCall(), setVoice(idleVoice)) // client-internal (gateway.ts logout)
+  if (!v.channelId || from !== nodeOf(v.guildId)) return
+  const idle = () => (endCall(), setVoice({ ...idleVoice, selfMute: v.selfMute, selfDeaf: v.selfDeaf }))
   switch (t) {
-    case 'READY':
-      // A new gateway session lost the old voice state on the server: join again.
-      if (v.channelId && (v.guildId ? s.guilds[v.guildId] : s.channels[v.channelId])) (setVoice({ status: last ? v.status : 'waiting' }), sendState(), waitForServer())
-      else if (v.channelId) (teardown(), setVoice({ ...idleVoice, selfMute: v.selfMute, selfDeaf: v.selfDeaf }))
-      return
-    case 'VOICE_SERVER_UPDATE':
-      if ((d.guild_id ?? null) !== v.guildId) return
-      if (d.channel_id) setVoice({ channelId: d.channel_id })
+    case 'READY': {
+      // A new gateway session lost our voice state on the server. READY never makes a join: only a call that was
+      // connected when the connection dropped comes back (same channel, same media host, microphone as it was); a join
+      // the user started just now is asked again; anything else (waiting, failed, not configured) ends here.
+      const snap = dropped !== undefined ? dropped : restorable()
+      dropped = undefined
+      const exists = v.guildId ? s.guilds[v.guildId] : s.channels[v.channelId]
+      const verdict = exists ? readyVerdict(v, snap, intent, Date.now()) : 'end'
+      if (verdict === 'end') return idle()
+      if (verdict === 'rejoin') {
+        intend(v.guildId, v.channelId)
+        rejoinHost = snap!.host
+        setVoice({ status: 'waiting', error: '', video: false, stream: false }) // camera and screen never come back by themselves
+      }
+      sendState()
+      return waitForServer()
+    }
+    case 'VOICE_SERVER_UPDATE': {
+      const established = !!last && v.status !== 'error' && v.status !== 'idle' && v.status !== 'unconfigured'
+      if (!serverUpdateAllowed(d, intent, { guildId: v.guildId, channelId: v.channelId, established }, Date.now())) return void console.warn('voice: ignored a VOICE_SERVER_UPDATE for a call not started here')
       if (!d.endpoint) return void (teardown(), setVoice({ status: 'unconfigured', error: 'Voice is not configured on this server' }))
-      return void connectRoom(d.endpoint, d.token)
+      const url = mediaUrl(d.endpoint, from ? (instanceById(from)?.url ?? '') : apiOrigin())
+      const host = rejoinHost
+      rejoinHost = null
+      if (!url || typeof d.token !== 'string' || (host && mediaHost(url) !== host)) {
+        console.warn('voice: ignored a VOICE_SERVER_UPDATE naming a media server that is not this server\'s (or not the one of the call)')
+        // a call already running stays as it is; a join waiting for this answer fails
+        if (!established) (intent = null), setVoice({ status: 'error', error: 'The server named a voice server that is not its own.' })
+        return
+      }
+      return void connectRoom(url, d.token)
+    }
     case 'VOICE_STATE_UPDATE': {
-      if (d.user_id !== s.me?.id || !v.channelId) return
+      if (d.user_id !== s.me?.id) return
       // Joined elsewhere on the same server (hub or one node); a voice state from another node never ends this call.
       if (nodeOf(d.guild_id) !== nodeOf(v.guildId)) return
-      if (d.channel_id && d.session_id !== s.sessionId) return void (teardown(), setVoice({ ...idleVoice, selfMute: v.selfMute, selfDeaf: v.selfDeaf }))
+      if (d.channel_id && d.session_id !== s.sessionId) return idle()
       if ((d.guild_id ?? null) !== v.guildId) return
       if (ringOnJoin && d.channel_id === ringOnJoin) (api(`/channels/${ringOnJoin}/call/ring`, { method: 'POST', body: { recipients: null } }).catch(() => {}), (ringOnJoin = null))
-      if (!d.channel_id) return void (teardown(), setVoice({ ...idleVoice, selfMute: v.selfMute, selfDeaf: v.selfDeaf })) // disconnected by someone or something
-      if (d.channel_id !== v.channelId) setVoice({ channelId: d.channel_id }) // moved; a fresh VOICE_SERVER_UPDATE follows
-      return void syncMic() // server mute/deafen may have changed
+      if (!d.channel_id) return idle() // disconnected by someone or something
+      if (d.channel_id !== v.channelId) {
+        // moved by a moderator; a fresh VOICE_SERVER_UPDATE follows. Never a DM call, never to another server.
+        const verdict = moveVerdict(v.guildId, d, s.channels[d.channel_id], intent, Date.now())
+        if (verdict === 'ignore') return
+        setVoice({ channelId: d.channel_id })
+        // muted after the channel changed: the mute's voice state must name the new channel, or it moves us back
+        if (verdict === 'moved') mutedByServer('moved')
+      }
+      return void syncMic() // the server may take the microphone away; giving it back asks the user (gate)
     }
-    case 'VOICE_CHANNEL_EFFECT_SEND':
+    // what the server lets us do in the call changed (roles, member mute, channel overwrites or type): checked again
+    case 'GUILD_MEMBER_UPDATE': case 'GUILD_ROLE_UPDATE': case 'GUILD_ROLE_DELETE': case 'CHANNEL_UPDATE': case 'GUILD_CREATE': case 'GUILD_UPDATE':
+      return void ((d?.guild_id ?? d?.id) === v.guildId && syncMic())
+    case 'VOICE_CHANNEL_EFFECT_SEND': {
       if (d.channel_id !== v.channelId) return
       // v6: `entrance: true` is someone's entrance sound (a soundboard sound or their own upload at `sound_url`); it replaces the join chime
       if (d.entrance) entranceHeard.set(d.user_id, Date.now())
-      if (d.sound_id && !deafened() && !(d.entrance && s.settings.sound_settings?.muted))
-        playSound(String(d.sound_id), d.sound_volume ?? 1, d.sound_url ? cdn(d.sound_url) : undefined, d.user_id)
+      // round 7: a sound loads only from the connection's own host (a node's are on its origin already)
+      const url = d.sound_url ? cdn(d.sound_url) : undefined
+      if (d.sound_id && !deafened() && !(d.entrance && s.settings.sound_settings?.muted) && soundAllowed(url, from ? (instanceById(from)?.url ?? '') : apiOrigin()))
+        playSound(String(d.sound_id), d.sound_volume ?? 1, url, d.user_id)
       setVoice({ effects: { ...v.effects, [d.user_id]: d.emoji?.name ?? '🔊' } })
       setTimeout(() => {
         const { [d.user_id]: _, ...rest } = getState().voice.effects
         setVoice({ effects: rest })
       }, 3000)
       return
+    }
     case 'CILLVOICE_ANSWER': case 'CILLVOICE_TRACKS': case 'CILLVOICE_SPEAKING': case 'CILLVOICE_ERROR':
+      if (d?.channel_id != null && d.channel_id !== v.channelId) return
       return cv.event(t, d)
     case 'CHANNEL_DELETE':
-      if (d.id === v.channelId) (teardown(), setVoice({ ...idleVoice, selfMute: v.selfMute, selfDeaf: v.selfDeaf }))
+      if (d.id === v.channelId) idle()
       return
     case 'GUILD_DELETE':
-      if (d.id === v.guildId) (teardown(), setVoice({ ...idleVoice, selfMute: v.selfMute, selfDeaf: v.selfDeaf }))
+      if (d.id === v.guildId) idle()
       return
-    case 'LOGOUT':
-      teardown()
-      setVoice(idleVoice)
   }
 }

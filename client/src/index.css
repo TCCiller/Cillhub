@@ -1114,6 +1114,7 @@ input.switch:disabled { cursor: not-allowed; }
 .toasts { position: fixed; left: 50%; bottom: 24px; translate: -50% 0; z-index: 50; display: grid; gap: 8px; pointer-events: none; }
 .toast { padding: 10px 18px; border-radius: var(--radius-m); border: 1px solid var(--border); border-left: 4px solid var(--accent); background: var(--menu); color: var(--header); box-shadow: var(--shadow); font-size: 14px; font-weight: 500; max-width: min(480px, 90vw); animation: rise-in .22s var(--ease-out); }
 .toasts:empty { display: none; }
+.toast-action { pointer-events: auto; margin-left: 6px; font-weight: 600; }
 .dialog-body { margin-bottom: 8px; display: grid; gap: 8px; }
 .dialog-quote { margin: 0; padding: 10px 12px; border-radius: var(--radius-s); background: var(--sidebar); border-left: 4px solid var(--accent); max-height: 160px; overflow: hidden; white-space: pre-wrap; }
 .leave-url { padding: 8px 12px; border-radius: var(--radius-s); border: 1px solid var(--border); background: var(--rail); font-family: var(--font-mono); font-size: 13.5px; word-break: break-all; }

@@ -92,4 +92,7 @@ export const v8: Record<string, string> = {
   'Reconnect': 'Neu verbinden', 'Reconnect {name}': '{name} neu verbinden',
   'Something went wrong': 'Etwas ist schiefgelaufen', 'Cillhub could not show this page. Reloading usually fixes it.': 'Cillhub konnte diese Seite nicht anzeigen. Neu laden behebt das meist.',
   'From {instance}, a separate server. What you enter goes there.': 'Von {instance}, einem eigenen Server. Was du eingibst, geht dorthin.',
+  'You were moved to another voice channel. Your microphone is muted; unmute when you are ready.': 'Du wurdest in einen anderen Sprachkanal verschoben. Dein Mikrofon ist stummgeschaltet; schalte es wieder ein, wenn du bereit bist.',
+  'You were invited to speak. Your microphone is muted; unmute when you are ready.': 'Du wurdest zum Sprechen eingeladen. Dein Mikrofon ist stummgeschaltet; schalte es wieder ein, wenn du bereit bist.',
+  'You can speak now. Your microphone stays off until you unmute.': 'Du kannst jetzt sprechen. Dein Mikrofon bleibt aus, bis du die Stummschaltung aufhebst.',
 }

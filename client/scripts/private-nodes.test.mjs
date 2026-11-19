@@ -183,16 +183,63 @@ test('5: voice signalling and voice servers only for the call on that node (DM c
 })
 
 test('6: a modal shows where we sent the interaction and names our application, whatever the node says', () => {
-  sent.set('55', { channelId: '7~101', appId: '7~30', type: 2 })
+  sent.set('55', { channelId: '7~101', appId: '7~30', type: 2 , at: Date.now() })
   const m = reg.admit('7', 'INTERACTION_MODAL_CREATE', { nonce: '55', id: '56', custom_id: 'm', title: 'Password?', application: { id: '31', name: 'Bank' }, components: [] })
   assert.deepEqual([m.channel_id, m.application.id], ['7~101', '7~30'])
   assert.equal(reg.admit('7', 'INTERACTION_MODAL_CREATE', { nonce: '55', id: '57', custom_id: 'm', title: 'x', components: [] }), null, 'used up')
-  sent.set('56', { channelId: '7~101', appId: '7~30', type: 5 })
+  sent.set('56', { channelId: '7~101', appId: '7~30', type: 5 , at: Date.now() })
   assert.equal(reg.admit('7', 'INTERACTION_MODAL_CREATE', { nonce: '56', components: [] }), null, 'a modal submit cannot open another modal')
-  sent.set('57', { channelId: '7~101', appId: '7~30', type: 2 })
+  sent.set('57', { channelId: '7~101', appId: '7~30', type: 2 , at: Date.now() })
   for (const components of [undefined, null, [null], [{ type: 1, components: [null] }]])
     assert.equal(reg.admit('7', 'INTERACTION_MODAL_CREATE', { nonce: '57', id: '58', custom_id: 'm', title: 't', components }), null, JSON.stringify(components))
   assert.ok(sent.has('57'), 'a refused modal does not use up the interaction')
+})
+
+test('round 7 (A-R7-6): a form answers only an interaction sent here a moment ago, on the same connection', () => {
+  // node: too old
+  sent.set('60', { channelId: '7~101', appId: '7~30', type: 2, at: Date.now() - reg.MODAL_MS - 1 })
+  assert.equal(reg.admit('7', 'INTERACTION_MODAL_CREATE', { nonce: '60', components: [] }), null, 'node form for an old interaction')
+  // hub: no interaction pending (the red team's unsolicited "recovery key" form)
+  const form = { nonce: 'none', channel_id: '200', id: '1', application: { id: '1', name: 'Cillhub Security' }, title: 'Confirm your encryption recovery key', components: [{ type: 1, components: [{ type: 4, custom_id: 'key' }] }] }
+  assert.equal(reg.hubAdmit('INTERACTION_MODAL_CREATE', form), null, 'hub form with no pending interaction')
+  // hub: our own command in a hub channel, answered at once: shown where we sent it, naming our application
+  sent.set('61', { channelId: '200', appId: '300', type: 2, at: Date.now() })
+  const ok = reg.hubAdmit('INTERACTION_MODAL_CREATE', { ...form, nonce: '61', channel_id: '999', application: { id: '1', name: 'Poll' } })
+  assert.equal(ok, null, 'a form naming another channel than the one we sent it in')
+  const good = reg.hubAdmit('INTERACTION_MODAL_CREATE', { ...form, nonce: '61', channel_id: undefined, application: { id: '1', name: 'Poll' } })
+  assert.deepEqual([good.channel_id, good.application.id, good.application.name], ['200', '300', 'Poll'])
+  assert.equal(reg.hubAdmit('INTERACTION_MODAL_CREATE', { ...form, nonce: '61' }), null, 'used up')
+  // hub: too old, an autocomplete or a modal submit, a node's interaction
+  sent.set('62', { channelId: '200', appId: '300', type: 2, at: Date.now() - reg.MODAL_MS - 1 })
+  sent.set('63', { channelId: '200', appId: '300', type: 4, at: Date.now() })
+  sent.set('64', { channelId: '200', appId: '300', type: 5, at: Date.now() })
+  sent.set('65', { channelId: '7~101', appId: '7~30', type: 2, at: Date.now() })
+  for (const n of ['62', '63', '64', '65']) assert.equal(reg.hubAdmit('INTERACTION_MODAL_CREATE', { ...form, nonce: n, channel_id: undefined }), null, n)
+  // a node cannot answer the hub's interaction either
+  sent.set('66', { channelId: '200', appId: '300', type: 2, at: Date.now() })
+  assert.equal(reg.admit('7', 'INTERACTION_MODAL_CREATE', { nonce: '66', components: [] }), null)
+})
+
+test('round 7 (A-R7-4, A-R7-8): a hub event never names a node object', () => {
+  for (const [t, d] of [
+    ['CHANNEL_DELETE', { id: '7~101', guild_id: '7~100' }],
+    ['GUILD_DELETE', { id: '7~100' }],
+    ['VOICE_CHANNEL_EFFECT_SEND', { channel_id: '7~101', guild_id: '7~100', user_id: '2', sound_id: '5', sound_url: 'https://x.example/a.ogg' }],
+    ['CILLVOICE_TRACKS', { channel_id: '7~101', tracks: [] }],
+    ['MESSAGE_CREATE', { id: '5', channel_id: '7~101', author: { id: '2' }, content: 'x' }],
+    ['VOICE_STATE_UPDATE', { guild_id: '7~100', channel_id: '7~101', user_id: '1' }],
+    ['GUILD_MEMBER_UPDATE', { guild_id: '100', roles: ['7~5'], user: { id: '2' } }],
+    ['MESSAGE_CREATE', { id: '5', channel_id: '200', author: { id: '2' }, mentions: [{ id: '7~900' }], content: 'x' }],
+    ['READY', { user: { id: '1' }, guilds: [{ id: '100', channels: [{ id: '7~101' }] }] }],
+    ['INTERACTION_CREATE', { nonce: '1', resolved: { users: { '7~900': { id: '2' } } } }],
+  ]) assert.equal(reg.hubAdmit(t, d), null, `${t} ${JSON.stringify(d)}`)
+  // ordinary hub events pass unchanged; free trees (activities, components) and free ids are not ids
+  for (const [t, d] of [
+    ['CHANNEL_DELETE', { id: '101', guild_id: '100' }],
+    ['MESSAGE_CREATE', { id: '5', channel_id: '200', author: { id: '2' }, content: 'see 7~101', components: [{ type: 2, custom_id: '7~1' }] }],
+    ['PRESENCE_UPDATE', { user: { id: '2' }, activities: [{ id: '7~1', name: 'x' }] }],
+    ['CILLVOICE_ANSWER', { channel_id: '201', sdp: 'v=0', tracks: [{ id: '2-0' }] }],
+  ]) assert.deepEqual(reg.hubAdmit(t, d), d, t)
 })
 
 test('7: one id budget per node; past it the payload is refused and the node is over budget', () => {

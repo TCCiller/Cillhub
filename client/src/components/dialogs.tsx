@@ -12,7 +12,9 @@ type AskText = {
 export type Statement = { category: string; ground: 'terms' | 'illegal'; reason: string }
 type AskStatement = { id: number; kind: 'statement'; title: string; body?: ReactNode; confirm: string; categories: [string, string][]; initial?: string; resolve: (v: Statement | null) => void }
 type Dialog = Ask | AskText | AskStatement
-type Toast = { id: number; text: string }
+type Toast = { id: number; text: string; action?: ToastAction }
+/** A button in a toast (e.g. "Unmute"): the user's own click, never run by itself. */
+export type ToastAction = { label: string; run: () => void }
 
 let dialogs: Dialog[] = []
 let toasts: Toast[] = []
@@ -36,12 +38,13 @@ export const askStatement = (o: { title: string; body?: ReactNode; confirm: stri
 
 let toastId = 0
 /** A short message in the bottom toast region (role="alert"); replaces alert() for errors without a form. */
-export function toast(text: string) {
-  const t = { id: ++toastId, text }
+export function toast(text: string, action?: ToastAction) {
+  const t = { id: ++toastId, text, action }
   toasts = [...toasts.slice(-2), t]
   emit()
   setTimeout(() => ((toasts = toasts.filter((x) => x !== t)), emit()), 6000)
 }
+const dismiss = (id: number) => ((toasts = toasts.filter((x) => x.id !== id)), emit())
 export const toastError = (e: unknown) => toast(e instanceof Error ? e.message : String(e))
 
 function TextDialog({ d }: { d: AskText }) {
@@ -125,7 +128,7 @@ export function DialogHost() {
       {d?.kind === 'text' && <TextDialog key={d.id} d={d} />}
       {d?.kind === 'statement' && <StatementDialog key={d.id} d={d} />}
       <div className="toasts" role="alert" aria-live="assertive">
-        {list.map((t) => <p key={t.id} className="toast">{t.text}</p>)}
+        {list.map((t) => <p key={t.id} className="toast">{t.text}{t.action && <> <button className="link toast-action" onClick={() => (dismiss(t.id), t.action!.run())}>{t.action.label}</button></>}</p>)}
       </div>
     </>
   )

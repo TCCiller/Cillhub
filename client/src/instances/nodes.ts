@@ -468,7 +468,8 @@ async function signInQuietly(node: InstanceInfo, live: () => boolean): Promise<s
   const q = consent.searchParams
   if (consent.origin !== apiOrigin() || consent.pathname !== '/oauth2/authorize' || q.get('client_id') !== node.id) throw bad()
   if (!live()) throw new Error('session ended') // no consent for an account that is gone
-  const keep = new URLSearchParams([...q].filter(([k]) => ['client_id', 'redirect_uri', 'response_type', 'scope', 'code_challenge', 'code_challenge_method', 'state'].includes(k)))
+  const keep = new URLSearchParams([...q].filter(([k]) => ['client_id', 'redirect_uri', 'response_type', 'code_challenge', 'code_challenge_method', 'state'].includes(k)))
+  keep.set('scope', 'identify') // round 7: the node gets only what the sign-in needs, whatever it asked for
   const { location } = await api<{ location: string }>(`/oauth2/authorize?${keep}`, { method: 'POST', body: { authorize: true } })
   let back: URL
   try { back = new URL(location) } catch { throw bad() }

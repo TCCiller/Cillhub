@@ -134,16 +134,18 @@ export function GuildIcon({ guild }: { guild: { id: string; name: string; icon: 
 }
 
 /** Native modal dialog: focus trap, Escape and inert background for free; focus returns to the opener on close. */
-export function Modal({ title, onClose, children, className, hideTitle }: { title: string; onClose: () => void; children: ReactNode; className?: string; hideTitle?: boolean }) {
+/** `holdFocus`: the dialog itself takes focus, not its first field (a dialog a server opened must not catch typing). */
+export function Modal({ title, onClose, children, className, hideTitle, holdFocus }: { title: string; onClose: () => void; children: ReactNode; className?: string; hideTitle?: boolean; holdFocus?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null)
   const id = useId()
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null
     ref.current?.showModal()
+    if (holdFocus) ref.current?.focus()
     return () => opener?.focus?.()
   }, [])
   return (
-    <dialog ref={ref} className={cls('modal', className)} aria-labelledby={id} onClose={onClose} onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <dialog ref={ref} className={cls('modal', className)} aria-labelledby={id} tabIndex={holdFocus ? -1 : undefined} onClose={onClose} onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal-body">
         <h2 id={id} className={hideTitle ? 'sr-only' : undefined}>{title}</h2>
         {children}

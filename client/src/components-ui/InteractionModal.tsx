@@ -32,10 +32,15 @@ export function InteractionModalView({ data, onClose }: { data: InteractionModal
   }
   // A node's modal says where it comes from (and where typed values go).
   const node = instanceById(nodeOf(data.channel_id))
+  // Round 7 (A-R7-6): a form is always marked as an app's, outside its own content (its title is the app's text, never
+  // the dialog's heading), and it does not take the focus from where the user types.
+  const app = typeof data.application?.name === 'string' && data.application.name.trim() ? data.application.name : t('an app')
   return (
-    <Modal title={data.title} onClose={onClose} className="interaction-modal">
-      {node && <p className="hint small node-origin">{t('From {instance}, a separate server. What you enter goes there.', { instance: node.name })}</p>}
-      {data.application?.name && <p className="hint small">{data.application.name}</p>}
+    <Modal title={t('Form from {app}', { app })} onClose={onClose} className="interaction-modal" holdFocus>
+      <p className="notice small form-origin">{node
+        ? t('From {instance}, a separate server. What you enter goes there.', { instance: node.name })
+        : t('An app on this server sent this form. What you enter goes to the app. Cillhub never asks for your password or recovery key in a form.')}</p>
+      {data.title && <h3 className="interaction-title">{data.title}</h3>}
       <form onSubmit={submit}>
         {fields.map(({ input: c, label, description }) => {
           const id = `im-${c.custom_id}`

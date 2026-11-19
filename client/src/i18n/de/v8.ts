@@ -98,4 +98,7 @@ export const v8: Record<string, string> = {
   'Accept with a click or {keys}': 'Annehmen per Klick oder mit {keys}',
   '{action} turns on your microphone, camera or screen: use a key with Ctrl, Alt or Cmd, or a key that types nothing (like F1-F12).':
     '{action} schaltet Mikrofon, Kamera oder Bildschirm ein: Nimm eine Taste mit Strg, Alt oder Cmd oder eine Taste, die nichts tippt (etwa F1-F12).',
+  'Form from {app}': 'Formular von {app}', 'an app': 'einer App',
+  'An app on this server sent this form. What you enter goes to the app. Cillhub never asks for your password or recovery key in a form.':
+    'Eine App auf diesem Server hat dieses Formular geschickt. Was du eingibst, geht an die App. Cillhub fragt in einem Formular nie nach deinem Passwort oder Wiederherstellungsschlüssel.',
 }

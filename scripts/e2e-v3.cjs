@@ -407,7 +407,7 @@ async function main() {
 
     // ---- 4. Stage ----
     let stageRoom
-    await step('4. stage: Alice starts it with a topic; Bob joins as audience (no mic in LiveKit), raises his hand, is invited and then publishes audio', async () => {
+    await step('4. stage: Alice starts it with a topic; Bob joins as audience (no mic in LiveKit), raises his hand, is invited (muted) and publishes audio after his own Unmute', async () => {
       await createChannel(alice, 'town-hall', 'Stage')
       const row = (p) => channels(p).getByRole('button', { name: /^town-hall \(stage channel/ })
       await row(alice).click()
@@ -432,7 +432,12 @@ async function main() {
       const req = stage(alice).getByRole('list', { name: 'Requested to Speak' })
       await req.getByRole('button', { name: `Invite ${NAME.bob} to Speak` }).click(LIVE)
       await stage(bob).getByRole('list', { name: 'Speakers' }).getByRole('button', { name: new RegExp(NAME.bob) }).waitFor(LIVE)
-      if (LK) await until('LiveKit to carry Bob\'s mic once he is a speaker', () => publishesMic(stageRoom, ids.bob), 15000)
+      // 7.12.2: an invited speaker starts muted with "You can speak now"; the mic opens on his own Unmute
+      const unmute = bob.locator('.toast-action', { hasText: 'Unmute' })
+      await unmute.waitFor(LIVE)
+      if (LK) check(!(await publishesMic(stageRoom, ids.bob)), 'LiveKit carries a mic track from Bob before he unmuted')
+      await unmute.click()
+      if (LK) await until('LiveKit to carry Bob\'s mic once he unmuted', () => publishesMic(stageRoom, ids.bob), 15000)
       await shot(alice, 'stage')
       for (const p of [bob, alice]) await p.getByRole('region', { name: 'Voice connection' }).getByRole('button', { name: 'Disconnect' }).click()
     })

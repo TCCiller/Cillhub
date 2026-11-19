@@ -707,7 +707,8 @@ async function main() {
 
     await step('14d. /feedback opens the bot\'s modal; the submitted text comes back in the bot\'s reply', async () => {
       await slash(alice, '#general', 'feedback')
-      const form = modal(alice, 'Feedback')
+      const form = modal(alice, /^Form from /) // 7.12.2: titled as the app's form; the app's own title below
+      await form.getByRole('heading', { name: 'Feedback' }).waitFor(LIVE)
       await form.getByLabel('Your feedback').fill(`More maps ${SFX}`)
       await form.getByRole('button', { name: 'Submit' }).click()
       await form.waitFor({ state: 'detached' })

@@ -265,13 +265,18 @@ async function main() {
       await until("Alice's video to leave Bob's grid again", async () => (await tile.locator('video').count()) === 0, 10000)
     })
 
-    await step("3f. Alice server-mutes Bob: Bob sees the icon and his mic stops; unmuting restores it", async () => {
+    await step("3f. Alice server-mutes Bob: Bob sees the icon and his mic stops; after the unmute Bob turns it back on from the prompt", async () => {
       await contextMenu(alice, voiceUser(alice, NAME.bob), 'Server Mute')
       await voiceUser(bob, NAME.bob).getByRole('img', { name: 'Server muted' }).waitFor(LIVE)
       if (LK) await until('LiveKit to stop carrying an unmuted mic track from Bob', async () => !(await publishesMic(room, ids.bob)), 10000)
       await until('Alice to lose the speaking indicator for Bob', async () => (await voiceUser(alice, NAME.bob).locator('.sr-only', { hasText: 'speaking' }).count()) === 0, 10000)
       await contextMenu(alice, voiceUser(alice, NAME.bob), 'Server Mute')
       await voiceUser(bob, NAME.bob).getByRole('img', { name: 'Server muted' }).waitFor({ state: 'detached', ...LIVE })
+      // 7.12.2: lifting the server mute does not reopen the mic; Bob gets "You can speak now" and unmutes himself
+      const unmute = bob.locator('.toast-action', { hasText: 'Unmute' })
+      await unmute.waitFor(LIVE)
+      if (LK && (await publishesMic(room, ids.bob))) throw new Error('Bob\'s mic was published again before he unmuted')
+      await unmute.click()
       if (LK) await until('LiveKit to carry Bob\'s mic again', () => publishesMic(room, ids.bob), 10000)
       await until("Alice to see Bob speaking again", () => voiceUser(alice, NAME.bob).locator('.sr-only', { hasText: 'speaking' }).count(), 15000)
     })

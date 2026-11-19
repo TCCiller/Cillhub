@@ -290,7 +290,7 @@ async function main() {
       await until("Alice to see Bob speaking again", () => speaking(alice, 'General', NAME.bob), 15000)
     })
 
-    await step('1c. Alice server-deafens Bob: his mic is off and the media server delivers him no audio, not even from Carol joining; lifting it restores both live, without a rejoin', async () => {
+    await step('1c. Alice server-deafens Bob: his mic is off and the media server delivers him no audio, not even from Carol joining; lifting it restores his audio live and the mic on his own Unmute, without a rejoin', async () => {
       await until('Bob to receive Alice\'s audio before the deafen', async () => (await audioIn(bob, 1000)) > 1000, 10000)
       await contextMenu(alice, voiceUser(alice, 'General', NAME.bob), 'Server Deafen')
       await voiceUser(bob, 'General', NAME.bob).getByRole('img', { name: 'Server deafened' }).waitFor(LIVE)
@@ -309,12 +309,15 @@ async function main() {
       await voiceUser(bob, 'General', NAME.bob).getByRole('img', { name: 'Server deafened' }).waitFor({ state: 'detached', ...LIVE })
       await until("Alice's audio to reach Bob again after the server undeafen", async () => (await audioIn(bob, 1000)) > 1000, 15000)
       await until("Bob's remote gains back to 1", async () => (await gains(bob)).every((v) => v === 1))
-      await micIs(ids.voice, ids.bob, true, "Bob's mic back after server undeafen")
+      // 7.12.2: lifting it never reopens the mic by itself; Bob gets "You can speak now" and unmutes himself
+      await micIs(ids.voice, ids.bob, false, "Bob's mic still off after server undeafen")
+      await bob.locator('.toast-action', { hasText: 'Unmute' }).click(LIVE)
+      await micIs(ids.voice, ids.bob, true, "Bob's mic back after his own Unmute")
       check((await bob.evaluate(() => window.__pcs.length)) === session, 'Bob did not rejoin (no new peer connection) to get audio back')
     })
 
     // ---- 2. Move ----
-    await step('2. Alice moves Bob to Lounge: his client joins the Lounge room and leaves General; all sidebars update', async () => {
+    await step('2. Alice moves Bob to Lounge: his client joins the Lounge room muted and leaves General; all sidebars update; his Unmute opens the mic', async () => {
       await contextMenu(alice, voiceUser(alice, 'General', NAME.bob), 'Move to Lounge')
       for (const p of [alice, bob, carol]) {
         await voiceUser(p, 'Lounge', NAME.bob).waitFor(LIVE)
@@ -326,7 +329,10 @@ async function main() {
         await until('LiveKit: Bob in the Lounge room', () => inRoom(ids.lounge, ids.bob), 10000)
         await until('LiveKit: Bob gone from General', async () => !(await inRoom(ids.voice, ids.bob)), 10000)
       }
-      await micIs(ids.lounge, ids.bob, true, 'Bob publishes in Lounge')
+      // 7.12.2: a moved user arrives muted with an Unmute prompt; the mic opens only on his own click
+      await micIs(ids.lounge, ids.bob, false, 'Bob arrives in Lounge muted')
+      await bob.locator('.toast-action', { hasText: 'Unmute' }).click(LIVE)
+      await micIs(ids.lounge, ids.bob, true, 'Bob publishes in Lounge after his Unmute')
       check(!(await bob.getByText('Lost the voice connection.').count()), 'no "Lost the voice connection" after the move')
     })
 

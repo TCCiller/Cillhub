@@ -95,4 +95,5 @@ export const v8: Record<string, string> = {
   'You were moved to another voice channel. Your microphone is muted; unmute when you are ready.': 'Du wurdest in einen anderen Sprachkanal verschoben. Dein Mikrofon ist stummgeschaltet; schalte es wieder ein, wenn du bereit bist.',
   'You were invited to speak. Your microphone is muted; unmute when you are ready.': 'Du wurdest zum Sprechen eingeladen. Dein Mikrofon ist stummgeschaltet; schalte es wieder ein, wenn du bereit bist.',
   'You can speak now. Your microphone stays off until you unmute.': 'Du kannst jetzt sprechen. Dein Mikrofon bleibt aus, bis du die Stummschaltung aufhebst.',
+  'Accept with a click or {keys}': 'Annehmen per Klick oder mit {keys}',
 }

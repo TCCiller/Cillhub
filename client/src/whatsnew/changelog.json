@@ -4,6 +4,26 @@
    "title": "Web app and server",
    "releases": [
     {
+     "version": "7.12.2",
+     "date": "2026-11-19",
+     "groups": [
+      {
+       "title": "Fixed",
+       "items": [
+        "Your microphone, camera and screen sharing now start only when you turn them on yourself. A server or a moderator can still mute you or move you, but never turn your microphone back on.",
+        "When a moderator moves you to another voice channel, lifts a server mute, lets you speak on a stage, or you are moved to the AFK channel, you arrive muted and see \"You can speak now. Your microphone stays off until you unmute.\" with an Unmute button.",
+        "If a voice join failed or timed out, it stays failed after a reconnect: click Join again. A call that was running when the connection dropped comes back as it was.",
+        "Incoming calls are accepted with a click or Ctrl+Alt+A. Enter and Space no longer answer a call, so typing in the chat cannot pick one up by accident.",
+        "Keybinds for mute, deafen, camera and screen share need Ctrl, Alt or Cmd, or a key that types nothing (like F1 to F12). No keybind fires while you are typing in a text field.",
+        "Private nodes added on another device show \"Use on this device\" once per device, with their full address. Addresses on your own computer or local network work only when you type them in yourself.",
+        "Forms from apps are labelled \"Form from <app>\" with a note that Cillhub never asks for your password or recovery key in a form, and they no longer take over your typing.",
+        "The invite page only ever joins the server it shows. While another invite loads, no Join button is shown.",
+        "Soundboard and entrance sounds load only from the server you are connected to."
+       ]
+      }
+     ]
+    },
+    {
      "version": "7.12.1",
      "date": "2026-11-12",
      "groups": [
@@ -784,6 +804,26 @@
   {
    "title": "Web-App und Server",
    "releases": [
+    {
+     "version": "7.12.2",
+     "date": "2026-11-19",
+     "groups": [
+      {
+       "title": "Behoben",
+       "items": [
+        "Mikrofon, Kamera und Bildschirmfreigabe starten jetzt nur, wenn du sie selbst einschaltest. Ein Server oder Moderator kann dich weiterhin stummschalten oder verschieben, aber dein Mikrofon nie wieder einschalten.",
+        "Verschiebt dich ein Moderator in einen anderen Sprachkanal, hebt er eine Server-Stummschaltung auf, lässt er dich auf einer Bühne sprechen oder wirst du in den AFK-Kanal verschoben, kommst du stummgeschaltet an und siehst „Du kannst jetzt sprechen. Dein Mikrofon bleibt aus, bis du die Stummschaltung aufhebst.“ mit einer Schaltfläche zum Einschalten.",
+        "Ist das Betreten eines Sprachkanals fehlgeschlagen oder abgelaufen, bleibt es auch nach einer neuen Verbindung so: Klicke noch einmal auf Beitreten. Ein Anruf, der beim Verbindungsabbruch lief, kommt so zurück, wie er war.",
+        "Eingehende Anrufe nimmst du per Klick oder mit Strg+Alt+A an. Enter und Leertaste nehmen keinen Anruf mehr an, damit du beim Tippen im Chat nicht aus Versehen abhebst.",
+        "Tastenkürzel für Stummschalten, Taubschalten, Kamera und Bildschirmfreigabe brauchen Strg, Alt oder Cmd oder eine Taste, die nichts tippt (etwa F1 bis F12). Während du in einem Textfeld tippst, löst kein Tastenkürzel aus.",
+        "Private Nodes, die auf einem anderen Gerät hinzugefügt wurden, zeigen einmal pro Gerät „Auf diesem Gerät nutzen“ mit ihrer vollen Adresse. Adressen auf deinem eigenen Computer oder im lokalen Netz funktionieren nur, wenn du sie selbst eingibst.",
+        "Formulare von Apps sind als „Formular von <App>“ gekennzeichnet, mit dem Hinweis, dass Cillhub in einem Formular nie nach deinem Passwort oder Wiederherstellungsschlüssel fragt, und sie übernehmen deine Eingabe nicht mehr.",
+        "Die Einladungsseite tritt nur dem Server bei, den sie anzeigt. Während eine andere Einladung lädt, gibt es keine Beitreten-Schaltfläche.",
+        "Soundboard- und Eintrittssounds werden nur von dem Server geladen, mit dem du verbunden bist."
+       ]
+      }
+     ]
+    },
     {
      "version": "7.12.1",
      "date": "2026-11-12",

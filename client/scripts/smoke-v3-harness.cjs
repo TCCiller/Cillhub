@@ -189,11 +189,13 @@ async function open(browser, { routes, viewport = { width: 1440, height: 900 }, 
       if (f.op === 4 && f.d.channel_id) {
         dispatch('VOICE_STATE_UPDATE', { ...voiceState(me, f.d.channel_id), ...f.d, user_id: me.id, session_id: 's3', suppress: f.d.channel_id === '305' })
         // Like the server: a fresh VOICE_SERVER_UPDATE only when joining or moving, not for flag changes (mute, stream).
-        if (f.d.channel_id !== voiceChannel) dispatch('VOICE_SERVER_UPDATE', { guild_id: f.d.guild_id, channel_id: f.d.channel_id, token: livekit ? 'fake-token' : null, endpoint: livekit ? 'ws://fake-livekit.invalid' : null })
+        if (f.d.channel_id !== voiceChannel) dispatch('VOICE_SERVER_UPDATE', { guild_id: f.d.guild_id, channel_id: f.d.channel_id, token: livekit ? 'fake-token' : null, endpoint: livekit ? '/livekit' : null })
         voiceChannel = f.d.channel_id
       }
     })
   })
+  // the YouTube player iframe (v3-core 3) stays local: no request to the real host, no browser error page in the frame
+  await page.route('https://www.youtube-nocookie.com/**', (r) => r.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
   if (livekit) await page.route(/\/assets\/livekit-client[^/]*\.js$/, (r) => r.fulfill({ contentType: 'text/javascript', body: FAKE_LIVEKIT }))
   await page.route('**/{api/v9,attachments,emojis,stickers,soundboard-sounds,external}/**', async (r) => {
     const url = new URL(r.request().url())

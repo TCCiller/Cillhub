@@ -200,17 +200,23 @@ async function main(browser, errors) {
   assert.deepEqual(interactions.find((i) => i.data.custom_id === 'die').data.values, ['20'])
   console.log('ok v4 10 - button and select components send type 3 interactions; link button confirmation')
 
-  // 11. Modal from the app: text input, submit sends MODAL_SUBMIT (type 5).
-  dispatch('INTERACTION_MODAL_CREATE', { id: '992', channel_id: '300', custom_id: 'feedback', title: 'Feedback', application: { id: '900', name: 'Dicey' },
-    components: [{ type: 1, components: [{ type: 4, custom_id: 'text', label: 'Your feedback', style: 2, required: true }] }] })
-  const modal = page.getByRole('dialog', { name: 'Feedback' })
+  // 11. Modal from the app: text input, submit sends MODAL_SUBMIT (type 5). A form answers only our own interaction (the
+  // select just sent, by its nonce); one the server sends unasked is dropped. The dialog is titled as the app's form.
+  const appForm = { id: '992', channel_id: '300', custom_id: 'feedback', title: 'Feedback', application: { id: '900', name: 'Dicey' },
+    components: [{ type: 1, components: [{ type: 4, custom_id: 'text', label: 'Your feedback', style: 2, required: true }] }] }
+  dispatch('INTERACTION_MODAL_CREATE', appForm)
+  await page.waitForTimeout(200)
+  assert.equal(await page.getByRole('dialog', { name: 'Form from Dicey' }).count(), 0, 'a form nobody asked for is not shown')
+  dispatch('INTERACTION_MODAL_CREATE', { ...appForm, nonce: interactions.find((i) => i.data.custom_id === 'die').nonce })
+  const modal = page.getByRole('dialog', { name: 'Form from Dicey' })
+  await modal.getByRole('heading', { name: 'Feedback' }).waitFor()
   await modal.getByLabel('Your feedback').fill('More dice please')
   await modal.getByRole('button', { name: 'Submit' }).click()
   await modal.waitFor({ state: 'detached' })
   const submit = interactions.find((i) => i.type === 5)
   assert.equal(submit.data.id, '992')
   assert.equal(submit.data.components[0].components[0].value, 'More dice please')
-  console.log('ok v4 11 - application modal submits the text input (type 5)')
+  console.log('ok v4 11 - application modal answers our own interaction, is labelled as the app\'s form, submits the text input (type 5)')
 
   // 12. Quick switcher (Ctrl+K), fuzzy.
   await page.keyboard.press('Control+k')

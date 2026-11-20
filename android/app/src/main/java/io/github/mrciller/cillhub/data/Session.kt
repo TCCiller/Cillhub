@@ -73,6 +73,11 @@ object Session {
             },
             onAuthFailed = { Log.i(TAG, "token rejected"); scope.launch { forget() } },
             afk = { !visible },
+            onAccessDenied = {
+                // /users/@me and /instance are exempt from the terms gate. Use a
+                // gated read so Rest surfaces required_actions in the existing dialog.
+                scope.launch { runCatching { rest.request("GET", "/users/@me/guilds") } }
+            },
         )
     }
 
@@ -178,6 +183,7 @@ object Session {
 
     /** Local part of logging out (also when the server rejected the token). */
     fun forget() {
+        ApiError.termsGate.value = null
         TokenStore.clear(app)
         conn.stop()
         connected = false

@@ -88,6 +88,23 @@ class GatewayProtocolTest {
         assertTrue(sent.isEmpty())
     }
 
+    @Test fun accessDeniedRequestsAnActionWithoutDiscardingTheToken() {
+        var checks = 0
+        val protocol = GatewayProtocol({ token }, JSONObject(), { sent.add(JSONObject(it)) }, { _, _ -> },
+            onAccessDenied = { checks++ })
+        protocol.onText("""{"op":0,"t":"READY","s":1,"d":{"session_id":"old"}}""")
+        assertEquals(GatewayProtocol.Action.RECONNECT, protocol.onClose(4003))
+        assertEquals(1, checks)
+        assertNull(protocol.sessionId)
+        assertNull(protocol.seq)
+        sent.clear()
+        protocol.onText("""{"op":10,"d":{"heartbeat_interval":41250}}""")
+        assertEquals(2, sent.single().getInt("op"))
+        assertEquals(token, sent.single().getJSONObject("d").getString("token"))
+        assertEquals(GatewayProtocol.Action.STOP, protocol.onClose(4004))
+        assertEquals(1, checks)
+    }
+
     @Test fun garbageIsIgnored() {
         assertEquals(GatewayProtocol.Action.NONE, p.onText("not json"))
         assertTrue(events.isEmpty())

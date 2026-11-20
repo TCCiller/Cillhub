@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { on } from 'node:events';
+import { on, once } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
+import { join } from 'node:path';
 import WebSocket from 'ws';
 import { startServer } from './helpers.js';
 
@@ -58,6 +60,54 @@ test('Android 3.7.1 discovery, login and gateway connection', { timeout: 15000 }
     while (ack.op === 0) ack = await next(); // presence dispatches may precede the ACK
     assert.equal(ack.op, 11);
     await messages.return();
+  } finally {
+    ws?.terminate();
+    await srv.stop();
+  }
+});
+
+test('Android gets the required action after a gated gateway login and can reconnect after acceptance', { timeout: 15000 }, async () => {
+  const srv = await startServer();
+  const headers = { 'User-Agent': 'Cillhub-Android/3.7.1' };
+  let ws;
+  try {
+    const registered = await srv.api('POST', '/auth/register', null, {
+      email: 'gated@example.invalid', username: 'gated', password: 'android-test-password',
+      age_confirmed: true, terms_accepted: true,
+    }, headers);
+    assert.equal(registered.status, 201);
+    // Existing accounts can require confirmation even though fresh sign-ups do not.
+    const db = new DatabaseSync(join(srv.dataDir, 'cillcord.sqlite'));
+    try { db.prepare('UPDATE users SET legal_pending = 1 WHERE username = ?').run('gated'); }
+    finally { db.close(); }
+    const login = await srv.api('POST', '/auth/login', null, {
+      login: 'gated', password: 'android-test-password',
+    }, headers);
+    assert.equal(login.status, 200);
+    const token = login.body.token;
+    assert.equal(typeof token, 'string');
+    const identify = { op: 2, d: { token, properties: { os: 'Android', browser: 'Cillhub Android', device: 'test' } } };
+    ws = new WebSocket(`${srv.origin.replace('http', 'ws')}/gateway?v=9&encoding=json`, { headers });
+    const closed = once(ws, 'close');
+    assert.equal(JSON.parse((await once(ws, 'message'))[0]).op, 10);
+    ws.send(JSON.stringify(identify));
+    assert.equal((await closed)[0], 4003);
+    const blocked = await srv.api('GET', '/users/@me/guilds', token, undefined, headers);
+    assert.equal(blocked.status, 403);
+    assert.deepEqual(blocked.body.required_actions, ['accept_terms']);
+    assert.match(blocked.body.message, /sign in once on the website/);
+    // The website accepts on the same account; Android keeps its original token.
+    const status = await srv.api('GET', '/legal/status', token);
+    const accepted = await srv.api('POST', '/legal/accept', token, {
+      version: status.body.accept_version, age_confirmed: true,
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal((await srv.api('GET', '/users/@me/guilds', token, undefined, headers)).status, 200);
+    ws = new WebSocket(`${srv.origin.replace('http', 'ws')}/gateway?v=9&encoding=json`, { headers });
+    await once(ws, 'message');
+    const ready = once(ws, 'message');
+    ws.send(JSON.stringify(identify));
+    assert.equal(JSON.parse((await ready)[0]).t, 'READY');
   } finally {
     ws?.terminate();
     await srv.stop();

@@ -14,6 +14,7 @@ class GatewayProtocol(
     private val dispatch: (type: String, data: JSONObject?) -> Unit,
     /** Whether the user is away from the app (nothing visible): op 3 afk after READY, so the server keeps pushes going. */
     private val afk: () -> Boolean = { true },
+    private val onAccessDenied: () -> Unit = {},
 ) {
     enum class Action { NONE, START_HEARTBEAT, RECONNECT, STOP }
 
@@ -86,6 +87,13 @@ class GatewayProtocol(
 
     /** Socket closed with this code: what to do next. */
     fun onClose(code: Int): Action = when (code) {
+        4003 -> {
+            // A valid token can be gated on updated terms. Ask REST for the required
+            // action; reconnect with IDENTIFY after the user completes it on the website.
+            sessionId = null; seq = null
+            onAccessDenied()
+            Action.RECONNECT
+        }
         4004 -> { sessionId = null; seq = null; Action.STOP } // token revoked or wrong
         4010, 4011, 4012, 4013, 4014 -> Action.STOP
         4007, 4009 -> { sessionId = null; seq = null; Action.RECONNECT }

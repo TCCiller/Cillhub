@@ -6,6 +6,8 @@ import { messageObj, getChannel, AUTHOR_IS_ID_SQL } from '../message.js';
 import { loadChannel } from './channels.js';
 import { forViewer, seesContent } from './messages.js';
 
+export const SEARCH_RESULT_CAP = 10000;
+
 const HAS = {
   link: "(m.content LIKE '%http://%' OR m.content LIKE '%https://%')",
   embed: "(m.embeds != '[]' OR m.link_embeds != '[]')",
@@ -104,11 +106,11 @@ function search(query, readable, userId) {
   const relevance = query.get('sort_by') === 'relevance' && join;
   const dir = query.get('sort_order') === 'asc' ? 'ASC' : 'DESC';
   const from = `FROM messages m ${join} WHERE ${where.join(' AND ')}`;
-  const total = get(`SELECT COUNT(*) AS n ${from}`, ...args).n;
+  const total = get(`SELECT COUNT(*) AS n FROM (SELECT 1 ${from} LIMIT ${SEARCH_RESULT_CAP + 1})`, ...args).n;
   const rows = all(`SELECT m.* ${from} ORDER BY ${relevance ? 'f.rank' : `CAST(m.id AS INTEGER) ${dir}`} LIMIT ? OFFSET ?`, ...args, limit, offset);
   const threads = [...new Set(rows.map(m => m.channel_id))].map(getChannel).filter(isThread);
   return {
-    analytics_id: randomBytes(16).toString('hex'), doing_deep_historical_index: false, total_results: total,
+    analytics_id: randomBytes(16).toString('hex'), doing_deep_historical_index: false, total_results: Math.min(total, SEARCH_RESULT_CAP),
     messages: rows.map(m => {
       const { reactions: _, ...msg } = forViewer(messageObj(m, getChannel(m.channel_id), userId), viewer);
       return [{ ...msg, hit: true }];

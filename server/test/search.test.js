@@ -61,3 +61,35 @@ test('channel search covers DMs', async () => {
   assert.deepEqual(contents(await search(bob, 'content=raid', `/channels/${dm.id}`)), ['dm about the raid']);
   assert.equal((await search(alice, 'content=raid', `/channels/${dm.id}`)).status, 403);
 });
+
+test('search caps large totals at 10000 while preserving exact small totals and page rows', async () => {
+  process.env.DATA_DIR = srv.dataDir;
+  const { db, run, tx } = await import('../src/db.js');
+  const { SEARCH_RESULT_CAP } = await import('../src/routes/search.js');
+  const base = 1000000000000000000n;
+  try {
+    tx(() => {
+      for (let i = 0; i < 10050; i++) {
+        run('INSERT INTO messages (id, channel_id, author_id, content, timestamp) VALUES (?, ?, ?, ?, ?)',
+          String(base + BigInt(i)), g.general.id, alice.id, 'capfixture', '2026-11-23T12:00:00.000Z');
+      }
+    });
+    const large = await search(bob, 'content=capfixture');
+    assert.equal(large.status, 200);
+    assert.equal(SEARCH_RESULT_CAP, 10000);
+    assert.equal(large.body.total_results, SEARCH_RESULT_CAP);
+    assert.equal(large.body.messages.length, 25);
+    assert.deepEqual(large.body.messages.map(([m]) => m.id), Array.from({ length: 25 }, (_, i) => String(base + BigInt(10049 - i))));
+    const small = await search(bob, `content=capfixture&min_id=${base + 10046n}`);
+    assert.equal(small.body.total_results, 3);
+    assert.equal(small.body.messages.length, 3);
+    const empty = await search(bob, 'content=absentcapfixture');
+    assert.equal(empty.body.total_results, 0);
+    const lastPage = await search(bob, 'content=capfixture&offset=9975');
+    assert.equal(lastPage.body.messages.length, 25);
+    assert.equal(lastPage.body.total_results, SEARCH_RESULT_CAP);
+  } finally {
+    run('DELETE FROM messages WHERE content = ?', 'capfixture');
+    db.close();
+  }
+});

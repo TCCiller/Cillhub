@@ -442,8 +442,8 @@ export const addThreadMember = (threadId: string, userId: string) => api(`/chann
 export const removeThreadMember = (threadId: string, userId: string) => api(`/channels/${threadId}/thread-members/${userId}`, { method: 'DELETE' })
 export const listThreadMembers = (threadId: string) => api<(ThreadMember & { member?: Member })[]>(`/channels/${threadId}/thread-members?with_member=true`)
 /** Archived threads of a channel (public, or private ones you can see). Fills the store so they open like any thread. */
-export async function archivedThreads(channelId: string, kind: 'public' | 'private', before?: string) {
-  const r = await api<{ threads: Channel[]; members: ThreadMember[]; has_more: boolean }>(`/channels/${channelId}/threads/archived/${kind}${qs({ before, limit: 50 })}`)
+export async function archivedThreads(channelId: string, kind: 'public' | 'private' | 'joined', before?: string) {
+  const r = await api<{ threads: Channel[]; members: ThreadMember[]; has_more: boolean }>(`/channels/${channelId}/${kind === 'joined' ? 'users/@me/threads/archived/private' : `threads/archived/${kind}`}${qs({ before, limit: 50 })}`)
   apply('THREAD_LIST_SYNC', { guild_id: getState().channels[channelId]?.guild_id, threads: rows(r.threads), members: rows(r.members) })
   return r
 }

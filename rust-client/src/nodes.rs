@@ -2,7 +2,6 @@
 //! {origin, name} in settings.json, the same rules as the web client's src/privateNodes.ts.
 
 use crate::api::normalize_server_url;
-use crate::config::DEEP_LINK_SCHEMES;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_NODES: usize = 20;
@@ -98,11 +97,16 @@ pub fn add_link(origin: &str, node: &str) -> String {
 
 /// `cillhub://add-node#<address>` (address may be percent-encoded) → the node origin.
 pub fn parse_add_deep_link(raw: &str) -> Option<String> {
-    let rest = DEEP_LINK_SCHEMES.iter().find_map(|s| {
-        raw.get(..s.len() + 3).filter(|p| p.eq_ignore_ascii_case(&format!("{s}://"))).map(|_| &raw[s.len() + 3..])
-    })?;
+    if raw.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let rest = crate::deeplink::scheme_rest(raw)?;
     let address = rest.strip_prefix("add-node/#").or_else(|| rest.strip_prefix("add-node#"))?;
-    node_origin(&percent_encoding::percent_decode_str(address).decode_utf8().ok()?)
+    let decoded = percent_encoding::percent_decode_str(address).decode_utf8().ok()?;
+    if decoded.chars().any(char::is_whitespace) {
+        return None;
+    }
+    node_origin(&decoded)
 }
 
 /// The largest instance info answer read.

@@ -88,3 +88,34 @@ test('server guide: get default, put requires MANAGE_GUILD, emits GUILD_UPDATE, 
   assert.equal(bobGet.new_member_actions.length, 2);
   assert.equal(bobGet.resource_pages.length, 1);
 });
+
+test('server guide validates entries, bounds lists and restricts channels to the guild', async () => {
+  const path = `/guilds/${g.guild.id}/guide`;
+  const other = (await api('POST', '/guilds', alice.token, { name: 'Other guide guild' })).body;
+  const foreign = (await api('GET', `/guilds/${other.id}/channels`, alice.token)).body.find(c => c.type === 0);
+  const original = (await api('GET', path, alice.token)).body;
+  for (const field of ['new_member_actions', 'resource_pages']) {
+    for (const value of [null, {}, [null], [false], [1], ['entry'], [[]],
+      Array.from({ length: 6 }, () => ({ channel_id: g.general.id })),
+      [{ channel_id: foreign.id }], [{ channel_id: '' }], [{ channel_id: '1' }]]) {
+      const res = await api('PUT', path, alice.token, { [field]: value });
+      assert.equal(res.status, 400, `${field}: ${JSON.stringify(value)}`);
+      assert.equal(res.body.code, 50035);
+    }
+  }
+  assert.deepEqual((await api('GET', path, alice.token)).body, original, 'invalid requests do not change the guide');
+
+  const entries = [null, 123, {}, 'invalid', g.general.id].map(id => ({ id, channel_id: g.general.id, title: 'Guide' }));
+  const saved = await api('PUT', path, alice.token, { new_member_actions: entries, resource_pages: entries });
+  assert.equal(saved.status, 200);
+  for (const field of ['new_member_actions', 'resource_pages']) {
+    assert.equal(saved.body[field].length, 5);
+    for (const entry of saved.body[field]) {
+      assert.equal(typeof entry.id, 'string');
+      assert.match(entry.id, /^\d{1,19}$/);
+      assert.equal(entry.channel_id, g.general.id);
+    }
+    assert.equal(saved.body[field][4].id, g.general.id, 'valid entry IDs are preserved');
+  }
+  assert.deepEqual((await api('GET', path, bob.token)).body, saved.body);
+});

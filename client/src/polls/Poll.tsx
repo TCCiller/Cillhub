@@ -166,7 +166,7 @@ export function PollView({ m, canVote }: { m: Message; canVote: boolean }) {
         </span>
         <button type="button" className="link small" onClick={exportCsv}>{t('Export CSV')}</button>
         <span className="spacer" />
-        {!ended && canVote && mine.length > 0 && <button className="link small" onClick={() => votePoll(m, []).catch(toastError)}>{t('Remove Vote')}</button>}
+        {!ended && canVote && mine.length > 0 && !poll.is_quiz && poll.correct_answer_id == null && <button className="link small" onClick={() => votePoll(m, []).catch(toastError)}>{t('Remove Vote')}</button>}
         {!ended && canVote && !mine.length && (showResults
           ? <button className="link small" onClick={() => setShowResults(false)}>{t('Go back to vote')}</button>
           : <button className="link small" onClick={() => setShowResults(true)}>{t('Show results')}</button>)}

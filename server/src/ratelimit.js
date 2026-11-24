@@ -21,6 +21,7 @@ export function netOf(ip) {
 // [method, route pattern, limit, window ms]; first match wins, the last entry is the default for every other route
 const RULES = [
   ['POST', '/channels/:id/messages', 10, 5000],
+  ['POST', '/channels/:id/typing', 5, 5000],
   ['POST', '/auth/register', 10, 60_000],
   ['POST', '/interactions', 20, 5000],
   ['POST', '/channels/:id/messages/:mid/report', 5, 60_000],

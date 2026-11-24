@@ -1,6 +1,6 @@
 // Channel header "Threads" button: active and archived threads of the channel, search, Create.
 import { t } from '../i18n'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { archivedThreads } from '../actions'
 import { Popover, type Anchor } from '../components/menu'
 import { cls, Icon, ICONS } from '../components/ui'
@@ -10,6 +10,7 @@ import { activeThreads, usePerms } from '../selectors'
 import { cmpId, setState, useStore } from '../store'
 import type { Channel } from '../types'
 import { openThread, snowflakeTime } from './util'
+import { archivedCursor, type ArchivedKind } from './archived'
 import './threads.css'
 
 /** Header button with the threads list popover (active and archived threads, Create). */
@@ -31,12 +32,32 @@ function ThreadsPopover({ channel, at, onClose }: { channel: Channel; at: Anchor
   const [tab, setTab] = useState<'active' | 'archived'>('active')
   const [q, setQ] = useState('')
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [cursors, setCursors] = useState<Partial<Record<ArchivedKind, string>>>({})
+  const generation = useRef(0)
   useEffect(() => {
-    if (tab !== 'archived') return
+    const current = ++generation.current
+    setCursors({})
+    if (tab !== 'archived') { setStatus('idle'); return }
     setStatus('loading')
-    const kinds: ('public' | 'private')[] = has(perms, P.MANAGE_THREADS) ? ['public', 'private'] : ['public']
-    Promise.all(kinds.map((k) => archivedThreads(channel.id, k))).then(() => setStatus('idle'), () => setStatus('error'))
+    const kinds: ArchivedKind[] = has(perms, P.MANAGE_THREADS) ? ['public', 'private'] : ['public', 'joined']
+    Promise.all(kinds.map(async (kind) => [kind, archivedCursor(kind, await archivedThreads(channel.id, kind))] as const)).then(
+      (entries) => { if (generation.current === current) { setCursors(Object.fromEntries(entries)); setStatus('idle') } },
+      () => { if (generation.current === current) setStatus('error') },
+    )
+    return () => { generation.current++ }
   }, [tab, channel.id, perms])
+  const loadMore = async () => {
+    if (status === 'loading') return
+    const current = generation.current
+    setStatus('loading')
+    try {
+      await Promise.all((Object.entries(cursors) as [ArchivedKind, string | undefined][]).filter(([, before]) => before).map(async ([kind, before]) => {
+        const next = archivedCursor(kind, await archivedThreads(channel.id, kind, before))
+        if (generation.current === current) setCursors((old) => ({ ...old, [kind]: next }))
+      }))
+      if (generation.current === current) setStatus('idle')
+    } catch { if (generation.current === current) setStatus('error') }
+  }
   const canCreate = has(perms, P.CREATE_PUBLIC_THREADS) || has(perms, P.CREATE_PRIVATE_THREADS)
   const query = q.trim().toLowerCase()
   const list = (tab === 'active'
@@ -77,6 +98,9 @@ function ThreadsPopover({ channel, at, onClose }: { channel: Channel; at: Anchor
             </li>
           ))}
         </ul>
+        {tab === 'archived' && Object.values(cursors).some(Boolean) && (
+          <button className="link" disabled={status === 'loading'} onClick={loadMore}>{t('Load more')}</button>
+        )}
       </div>
     </Popover>
   )

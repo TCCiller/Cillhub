@@ -1,9 +1,14 @@
 package io.github.mrciller.cillhub
 
 import android.content.Context
+import java.security.SecureRandom
 
 /** Local app settings (not synced). */
 class Prefs(ctx: Context) {
+    companion object {
+        private val LOCK = Any()
+    }
+
     private val p = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     /** Foreground service with the native gateway connection; the delivery path that needs no Firebase. */
@@ -49,4 +54,15 @@ class Prefs(ctx: Context) {
     var dmReadReceipts: Boolean
         get() = p.getBoolean("dm_read_receipts", true)
         set(v) = p.edit().putBoolean("dm_read_receipts", v).apply()
+
+    /** Per-install secret required on EXTRA_PATH intents into the exported MainActivity. */
+    val pathToken: String
+        get() = synchronized(LOCK) {
+            p.getString("path_token", null)?.takeIf { it.isNotEmpty() } ?: run {
+                val raw = ByteArray(32).also { SecureRandom().nextBytes(it) }
+                val v = raw.joinToString("") { "%02x".format(it) }
+                p.edit().putString("path_token", v).commit()
+                v
+            }
+        }
 }

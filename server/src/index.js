@@ -1,6 +1,5 @@
 import { createServer } from 'node:http';
 import { BlockList, isIP } from 'node:net';
-import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DATA_DIR } from './db.js';
@@ -10,7 +9,7 @@ import { limit, netOf } from './ratelimit.js';
 import { compileRoute } from './route-policy.js';
 import { AccountExport } from './account-export.js';
 import { attachGateway } from './gateway.js';
-import { isCdnPath, serveCdn } from './files.js';
+import { isCdnPath, serveCdn, sendRanged } from './files.js';
 import { isProxyPath, serveExternal } from './proxy.js';
 import { isEphemeralPath, serveEphemeral } from './interactions.js';
 import { startTimers } from './timers.js';
@@ -400,8 +399,21 @@ const server = createServer(async (req, res) => {
       let rel;
       try { rel = decodeURIComponent(url.pathname); } catch { rel = '..'; }
       if (/(^|[/\\])\.\.([/\\]|$)|\0/.test(rel)) throw new HttpError(404, 0, '404: Not Found'); // no existence oracle outside the folders
-      const local = [STATIC_DIR && path.join(STATIC_DIR, rel), DATA_DIR && path.join(DATA_DIR, rel)].find(p => p && existsSync(p));
-      if (local) return await serveStatic(res, url.pathname);
+      for (const root of [STATIC_DIR, DATA_DIR]) {
+        if (!root) continue;
+        const file = path.join(root, rel);
+        const s = await stat(file).catch(e => {
+          if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e;
+        });
+        if (!s?.isFile()) continue;
+        const downloadHeaders = {
+          ...STATIC_HEADERS, 'Content-Type': TYPES[path.extname(file)] ?? 'application/octet-stream',
+          'Cache-Control': 'no-cache', ETag: `W/"${s.size.toString(16)}-${Math.floor(s.mtimeMs).toString(16)}"`,
+        };
+        if (path.extname(file) === '.html') downloadHeaders['Content-Security-Policy'] = "frame-ancestors 'self'";
+        if (req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https') downloadHeaders['Strict-Transport-Security'] = 'max-age=31536000';
+        return sendRanged(req, res, downloadHeaders, file, s.size);
+      }
       // only plain names go to the hub: no second escape layer (%252e) in its request, no quote in the filename header
       if (!/^[\w./ +-]+$/.test(rel)) throw new HttpError(404, 0, '404: Not Found');
       limit('GET', '/download', {}, netOf(clientIp(req)), headers); // every node relays these to the hub

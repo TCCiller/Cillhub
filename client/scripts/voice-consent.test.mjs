@@ -78,7 +78,7 @@ test('media endpoints: cillvoice or the connection\'s own host', () => {
 })
 
 test('the production hub passes the endpoint rule: its LiveKit and the built-in voice (cillvoice)', () => {
-  // /root/cillcord-prod compose: CILLCORD_PUBLIC_URL https://cillhub.cillerian.org, LIVEKIT_PUBLIC_URL wss://cillhub.cillerian.org/livekit
+  // production: CILLCORD_PUBLIC_URL https://cillhub.cillerian.org, LIVEKIT_PUBLIC_URL wss://cillhub.cillerian.org/livekit
   const site = 'https://cillhub.cillerian.org'
   const lk = mediaUrl('wss://cillhub.cillerian.org/livekit', site)
   assert.equal(lk, 'wss://cillhub.cillerian.org/livekit') // same host, wss, default port, path kept

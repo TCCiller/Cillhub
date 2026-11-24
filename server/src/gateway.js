@@ -60,9 +60,11 @@ export const moduleSinks = new Map();
 // d may be a function of the recipient's user id, for payloads that differ per user
 export function sendToUsers(userIds, t, d) {
   for (const id of new Set(userIds)) {
-    const own = sessions.get(id);
-    if (own) for (const s of own) deliver(s, t, typeof d === 'function' ? d(id) : d);
-    moduleSinks.get(id)?.(t, typeof d === 'function' ? d(id) : d);
+    const own = sessions.get(id), sink = moduleSinks.get(id);
+    if (!own?.size && !sink) continue;
+    const payload = typeof d === 'function' ? d(id) : d;
+    if (own) for (const s of own) deliver(s, t, payload);
+    sink?.(t, payload);
   }
 }
 

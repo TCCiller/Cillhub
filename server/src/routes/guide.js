@@ -1,5 +1,6 @@
 import { snowflake } from '../snowflake.js';
 import { get, run, memberIds, json } from '../db.js';
+import { invalid, list, snowflakeField } from '../errors.js';
 import { P } from '../permissions.js';
 import { sendToUsers, guildParts } from '../gateway.js';
 import { loadGuild } from './guilds.js';
@@ -36,24 +37,28 @@ function putGuide(ctx) {
   const body = ctx.body ?? {};
   const enabled = body.enabled !== undefined ? !!body.enabled : true;
   const welcomeMessage = body.welcome_message != null ? String(body.welcome_message).slice(0, 2000) : null;
-  const rawActions = Array.isArray(body.new_member_actions) ? body.new_member_actions : [];
-  const rawResources = Array.isArray(body.resource_pages) ? body.resource_pages : [];
-
-  const newMemberActions = rawActions.map(a => ({
-    id: a.id || snowflake(),
-    title: String(a.title || '').slice(0, 100),
-    description: a.description ? String(a.description).slice(0, 500) : null,
-    channel_id: String(a.channel_id || ''),
-    icon: a.icon ? String(a.icon).slice(0, 100) : null,
-  }));
-
-  const resourcePages = rawResources.map(r => ({
-    id: r.id || snowflake(),
-    title: String(r.title || '').slice(0, 100),
-    description: r.description ? String(r.description).slice(0, 500) : null,
-    channel_id: String(r.channel_id || ''),
-    icon: r.icon ? String(r.icon).slice(0, 100) : null,
-  }));
+  const entries = field => {
+    const rows = body[field] === undefined ? [] : list(body, field);
+    if (rows.length > 5) throw invalid(field, 'BASE_TYPE_MAX_LENGTH', 'At most 5 entries.');
+    return rows.map((entry, i) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw invalid(`${field}.${i}`, 'BASE_TYPE_OBJECT', 'Must be an object.');
+      }
+      const channelId = snowflakeField(entry, 'channel_id');
+      if (!get('SELECT 1 FROM channels WHERE id = ? AND guild_id = ?', channelId, g.id)) {
+        throw invalid(`${field}.${i}.channel_id`, 'BASE_TYPE_CHOICES', 'Channel must belong to this guild.');
+      }
+      return {
+        id: typeof entry.id === 'string' && /^\d{1,19}$/.test(entry.id) ? entry.id : snowflake(),
+        title: String(entry.title || '').slice(0, 100),
+        description: entry.description ? String(entry.description).slice(0, 500) : null,
+        channel_id: channelId,
+        icon: entry.icon ? String(entry.icon).slice(0, 100) : null,
+      };
+    });
+  };
+  const newMemberActions = entries('new_member_actions');
+  const resourcePages = entries('resource_pages');
 
   run(`
     INSERT INTO guild_server_guide (guild_id, enabled, welcome_message, new_member_actions, resource_pages)

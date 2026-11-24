@@ -42,9 +42,13 @@ function ackBulk({ body, user }) {
     const ok = r && (r.read_state_type ?? 0) === 0 && /^\d{1,19}$/.test(String(r.channel_id)) && /^[1-9]\d{0,18}$/.test(String(r.message_id));
     const ch = ok && getChannel(String(r.channel_id));
     if (!ch || !has(channelPerms(ch, user.id), P.VIEW_CHANNEL)) continue;
+    const newest = ch.last_message_id ?? ch.id;
+    const asked = BigInt(r.message_id) > BigInt(newest) ? newest : String(r.message_id);
     run(`INSERT INTO read_states (user_id, channel_id, last_message_id, mention_count) VALUES (?, ?, ?, 0)
-         ON CONFLICT DO UPDATE SET last_message_id = excluded.last_message_id, mention_count = 0`, user.id, ch.id, String(r.message_id));
-    sendToUsers([user.id], 'MESSAGE_ACK', { channel_id: ch.id, message_id: String(r.message_id) });
+         ON CONFLICT DO UPDATE SET last_message_id = excluded.last_message_id, mention_count = 0
+         WHERE last_message_id IS NULL OR CAST(last_message_id AS INTEGER) <= CAST(excluded.last_message_id AS INTEGER)`, user.id, ch.id, asked);
+    const mid = get('SELECT last_message_id FROM read_states WHERE user_id = ? AND channel_id = ?', user.id, ch.id).last_message_id;
+    sendToUsers([user.id], 'MESSAGE_ACK', { channel_id: ch.id, message_id: mid });
   }
 }
 

@@ -65,7 +65,9 @@ object Notifications {
     private fun code(channelId: String, salt: Int) = channelId.hashCode() * 31 + salt
 
     fun openIntent(ctx: Context, path: String): Intent =
-        Intent(ctx, MainActivity::class.java).setAction(Intent.ACTION_VIEW).putExtra(MainActivity.EXTRA_PATH, path)
+        Intent(ctx, MainActivity::class.java).setAction(Intent.ACTION_VIEW)
+            .putExtra(MainActivity.EXTRA_PATH, path)
+            .putExtra(MainActivity.EXTRA_PATH_TOKEN, Prefs(ctx).pathToken)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
 
     /** A new message from someone else; fetches the sender's avatar, so call off the main thread. */

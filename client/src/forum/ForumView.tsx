@@ -1,6 +1,6 @@
 // Forum channel (type 15): post list or gallery with tags, search, sort, layout, "New Post"; posts open in the thread panel.
 import { t } from '../i18n'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { archivedThreads, starterMessage, startThread } from '../actions'
 import { cdn } from '../api'
 import { HeaderTitle } from '../chat/Chat'
@@ -15,6 +15,7 @@ import { openThread, PINNED, REQUIRE_TAG, snowflakeTime } from '../threads/util'
 import type { Channel, Guild, Message } from '../types'
 import { TagChip, TagPicker } from './Tags'
 import { headerAccent } from '../custom/channel'
+import { archivedCursor } from '../threads/archived'
 import './forum.css'
 
 // Starter messages already fetched for post previews (null = none).
@@ -119,9 +120,21 @@ export function ForumView({ channel, guild }: { channel: Channel; guild: Guild }
   const [gallery, setGallery] = useState(channel.default_forum_layout === 2)
   const [menu, setMenu] = useState<Anchor | null>(null)
   const [composing, setComposing] = useState(false)
-  const [archived, setArchived] = useState<'no' | 'loading' | 'yes'>('no')
+  const [archived, setArchived] = useState(false)
+  const [archiveBusy, setArchiveBusy] = useState(false)
+  const [archiveError, setArchiveError] = useState('')
+  const [archiveBefore, setArchiveBefore] = useState<string>()
+  const archiveGeneration = useRef(0)
+  useEffect(() => {
+    archiveGeneration.current++
+    setArchived(false)
+    setArchiveBusy(false)
+    setArchiveError('')
+    setArchiveBefore(undefined)
+    return () => { archiveGeneration.current++ }
+  }, [channel.id])
   const query = q.trim().toLowerCase()
-  const showArchived = archived === 'yes'
+  const showArchived = archived
   const all = [
     ...activeThreads(s, channel.id),
     ...(showArchived ? Object.values(s.channels).filter((c) => c.parent_id === channel.id && c.thread_metadata?.archived) : []),
@@ -138,8 +151,20 @@ export function ForumView({ channel, guild }: { channel: Channel; guild: Guild }
       Number(!!((b.flags ?? 0) & PINNED)) - Number(!!((a.flags ?? 0) & PINNED)) ||
       (sort === 0 ? cmpId(b.last_message_id ?? b.id, a.last_message_id ?? a.id) : cmpId(b.id, a.id)))
   const loadArchived = () => {
-    setArchived('loading')
-    archivedThreads(channel.id, 'public').then(() => setArchived('yes'), () => setArchived('no'))
+    if (archiveBusy) return
+    const current = archiveGeneration.current
+    setArchiveBusy(true)
+    setArchiveError('')
+    archivedThreads(channel.id, 'public', archiveBefore).then((page) => {
+      if (archiveGeneration.current !== current) return
+      setArchiveBefore(archivedCursor('public', page))
+      setArchived(true)
+      setArchiveBusy(false)
+    }, () => {
+      if (archiveGeneration.current !== current) return
+      setArchiveError(t("Couldn't load archived threads."))
+      setArchiveBusy(false)
+    })
   }
   return (
     <main className="chat forum" aria-label={t('Forum {name}', { name: channel.name ?? '' })}>
@@ -198,8 +223,9 @@ export function ForumView({ channel, guild }: { channel: Channel; guild: Guild }
         ) : (
           <p className="hint forum-empty">{all.length ? t('No posts match your filters.') : t('There are no posts yet. Be the first!')}</p>
         )}
-        {archived !== 'yes' && (
-          <button className="link forum-more" disabled={archived === 'loading'} onClick={loadArchived}>{archived === 'loading' ? t('Loading…') : t('Show archived posts')}</button>
+        <FormError error={archiveError} />
+        {(!archived || archiveBefore) && (
+          <button className="link forum-more" disabled={archiveBusy} onClick={loadArchived}>{archiveBusy ? t('Loading…') : archived ? t('Load more') : t('Show archived posts')}</button>
         )}
       </div>
       {menu && (

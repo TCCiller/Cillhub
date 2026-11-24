@@ -40,7 +40,7 @@ self.addEventListener('fetch', (e) => {
 self.addEventListener('push', (e) => {
   let data = {}
   try { data = e.data ? e.data.json() : {} } catch { data = { body: e.data && e.data.text() } }
-  const url = typeof data.url === 'string' && data.url.startsWith('/') ? data.url : '/channels/@me'
+  const url = typeof data.url === 'string' && /^\/(?![/\\])/.test(data.url) ? data.url : '/channels/@me'
   e.waitUntil(self.registration.showNotification(data.title || 'Cillhub', {
     body: data.body || '', tag: data.tag || undefined, renotify: !!data.tag, icon: '/icon-192.png', badge: '/icon-192.png', data: { url },
   }))
@@ -49,7 +49,8 @@ self.addEventListener('push', (e) => {
 // Clicking a notification focuses an open Cillhub window on the right channel, or opens one.
 self.addEventListener('notificationclick', (e) => {
   e.notification.close()
-  const url = (e.notification.data && e.notification.data.url) || '/channels/@me'
+  const target = e.notification.data && e.notification.data.url
+  const url = typeof target === 'string' && /^\/(?![/\\])/.test(target) ? target : '/channels/@me'
   e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
     const win = list.find((c) => new URL(c.url).origin === location.origin)
     if (win) return win.focus().then((w) => (w || win).postMessage({ type: 'navigate', url }))

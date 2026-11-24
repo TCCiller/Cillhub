@@ -222,12 +222,15 @@ const MEMBER = `SELECT u.*, m.guild_id, m.joined_at, m.nick, m.mute, m.deaf, m.p
                   m.avatar AS member_avatar, m.banner AS member_banner, m.bio AS member_bio, m.display_name_styles AS member_name_styles
                 FROM members m JOIN users u ON u.id = m.user_id`;
 export const memberRow = (guildId, userId) => get(`${MEMBER} WHERE m.guild_id = ? AND m.user_id = ?`, guildId, userId);
-export const memberObj = row => ({
+export const memberObj = (row, roles) => ({
   user: userObj(row), nick: row.nick, avatar: row.member_avatar ?? null, banner: row.member_banner ?? null,
   joined_at: row.joined_at, mute: !!row.mute, deaf: !!row.deaf, flags: 0,
   pending: !!row.pending, communication_disabled_until: row.communication_disabled_until,
   display_name_styles: json(row.member_name_styles),
-  roles: all('SELECT role_id FROM member_roles WHERE guild_id = ? AND user_id = ?', row.guild_id, row.id).map(r => r.role_id),
+  roles: roles ?? all('SELECT role_id FROM member_roles WHERE guild_id = ? AND user_id = ?', row.guild_id, row.id).map(r => r.role_id),
 });
-export const membersOf = (guildId, limit = -1) =>
-  all(`${MEMBER} WHERE m.guild_id = ? ORDER BY m.joined_at LIMIT ?`, guildId, limit).map(memberObj);
+export const membersOf = (guildId, limit = -1) => {
+  const roles = Map.groupBy(all('SELECT user_id, role_id FROM member_roles WHERE guild_id = ?', guildId), r => r.user_id);
+  return all(`${MEMBER} WHERE m.guild_id = ? ORDER BY m.joined_at LIMIT ?`, guildId, limit)
+    .map(row => memberObj(row, (roles.get(row.id) ?? []).map(r => r.role_id)));
+};

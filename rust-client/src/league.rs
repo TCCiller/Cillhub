@@ -300,6 +300,7 @@ impl LeagueClient {
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(true) // Local self-signed Riot TLS cert
             .timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self { client })
     }
@@ -485,6 +486,44 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+
+    #[cfg(feature = "native-net")]
+    #[test]
+    fn lobby_redirect_is_an_error_and_is_not_followed() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        for status in ["302 Found", "307 Temporary Redirect"] {
+            let local = TcpListener::bind("127.0.0.1:0").unwrap();
+            let other = TcpListener::bind("127.0.0.1:0").unwrap();
+            other.set_nonblocking(true).unwrap();
+            let port = local.local_addr().unwrap().port();
+            let other_port = other.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut sock, _) = local.accept().unwrap();
+                sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = sock.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buf[..n]);
+                }
+                assert!(request.starts_with(b"GET /lol-lobby/v2/lobby "));
+                // Valid lobby JSON must not make a redirect count as a successful lookup.
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nLocation: http://127.0.0.1:{other_port}/collect\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                );
+                sock.write_all(response.as_bytes()).unwrap();
+            });
+            let creds = parse_lockfile(&format!("LeagueClient:1:{port}:secret:http")).unwrap();
+            let result = LeagueClient::new().unwrap().fetch_lobby(&creds);
+            server.join().unwrap();
+            assert_eq!(other.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(result.unwrap_err(), format!("LCU HTTP error: {status}"));
+        }
+    }
 
     #[test]
     fn test_parse_lockfile() {

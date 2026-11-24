@@ -141,3 +141,25 @@ test('notification settings, mentions inbox, bulk ack', async () => {
   assert.equal((await api('POST', '/read-states/ack-bulk', bob.token, { read_states: [{ channel_id: g.general.id, message_id: m2.id }, { channel_id: '1', message_id: '2' }] })).status, 204);
   assert.deepEqual(await bob.gw.event('MESSAGE_ACK', d => d.message_id === m2.id), { channel_id: g.general.id, message_id: m2.id });
 });
+
+test('bulk ack clamps future IDs and preserves read position and mentions on stale requests', async () => {
+  const ch = (await api('POST', `/guilds/${g.guild.id}/channels`, alice.token, { name: 'bulk-ack', type: 0 })).body;
+  const ack = async (message_id, expected) => {
+    assert.equal((await api('POST', '/read-states/ack-bulk', bob.token, {
+      read_states: [{ channel_id: ch.id, message_id }],
+    })).status, 204);
+    assert.deepEqual(await bob.gw.event('MESSAGE_ACK', d => d.channel_id === ch.id), {
+      channel_id: ch.id, message_id: expected,
+    });
+  };
+  await ack('9999999999999999999', ch.id);
+  const first = (await api('POST', `/channels/${ch.id}/messages`, alice.token, { content: 'first' })).body;
+  await ack('9999999999999999999', first.id);
+  await api('POST', `/channels/${ch.id}/messages`, alice.token, { content: `<@${bob.id}> unread` });
+  await ack(ch.id, first.id);
+  const again = await srv.gateway(bob.token);
+  const state = again.ready.read_state.find(r => r.id === ch.id);
+  again.ws.close();
+  assert.equal(state.last_message_id, first.id);
+  assert.equal(state.mention_count, 1);
+});

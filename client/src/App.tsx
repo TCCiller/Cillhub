@@ -9,6 +9,7 @@ import { Shell } from './components/Shell'
 import { UpdateBanner } from './components/UpdateBanner'
 import { AndroidMovedBanner } from './android/MovedBanner'
 import { Redirect, usePath } from './router'
+import { decodePart } from './routerDecode'
 import { useStore } from './store'
 import { useInstance } from './admin/instance'
 import { InstanceCallback } from './instances/InstanceUI'
@@ -48,9 +49,9 @@ function Page() {
   if (instance?.setup_pending) return section === 'setup' ? <Suspense fallback={null}><Setup /></Suspense> : <Redirect to="/setup" />
   if (section === 'setup') return instance ? <Redirect to="/login" /> : null
   if (section === 'instances' && a === 'callback') return <InstanceCallback />
-  if (section === 'invite' && a) return <InvitePage key={a} code={decodeURIComponent(a)} />
+  if (section === 'invite' && a) return <InvitePage key={a} code={decodePart(a)} />
   // Template links open "Add a server" with the code (templates/Templates.tsx); after login when needed.
-  if (section === 'template' && a) return sessionStorage.setItem('template-code', decodeURIComponent(a)), <Redirect to="/channels/@me" />
+  if (section === 'template' && a) return sessionStorage.setItem('template-code', decodePart(a)), <Redirect to="/channels/@me" />
   if (section === 'reset') return <ResetPage />
   // 7.10.3: legal pages, the public notice form and appeals work without a session (German aliases for the imprint etc.)
   const doc = LEGAL_PATHS[section]

@@ -33,6 +33,7 @@ class GatewayConnection(
     private val onState: (connected: Boolean) -> Unit,
     private val onAuthFailed: () -> Unit,
     private val afk: () -> Boolean = { true },
+    private val onAccessDenied: () -> Unit = {},
 ) {
     private val exec = Executors.newSingleThreadScheduledExecutor { Thread(it, "cillcord-gateway") }
     private var ws: WebSocket? = null
@@ -51,6 +52,7 @@ class GatewayConnection(
             onDispatch(t, d)
         },
         afk = afk,
+        onAccessDenied = onAccessDenied,
     )
 
     /** Sends a frame built by the protocol (presence, status) if a session is up; dropped otherwise (IDENTIFY/READY resend state). */

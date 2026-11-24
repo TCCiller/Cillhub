@@ -12,6 +12,7 @@ import { displayName, getState, setState, useStore } from '../store'
 import { parseQuery } from './query'
 import './search.css'
 
+const SEARCH_RESULT_CAP = 10000
 const PER_PAGE = 25
 type Sort = 'newest' | 'oldest' | 'relevance'
 
@@ -51,7 +52,7 @@ export function SearchPanel({ guildId, channelId, query }: { guildId?: string; c
   }, [guildId, channelId, parsed, page, sort])
 
   const total = result?.total_results ?? 0
-  const pages = Math.max(1, Math.ceil(Math.min(total, 10000) / PER_PAGE))
+  const pages = Math.max(1, Math.ceil(Math.min(total, SEARCH_RESULT_CAP) / PER_PAGE))
   const hits = (result?.messages ?? []).map((group) => group.find((m) => (m as { hit?: boolean }).hit) ?? group[0]).filter(Boolean)
   const close = () => setState({ panel: null })
 
@@ -69,7 +70,7 @@ export function SearchPanel({ guildId, channelId, query }: { guildId?: string; c
       />
       <header className="panel-header">
         <Icon d={ICONS.search} size={20} />
-        <h2 className="ellipsis" aria-live="polite">{result ? t(total === 1 ? '{n} Result' : '{n} Results', { n: total.toLocaleString() }) : error ? t('Search') : t('Searching…')}</h2>
+        <h2 className="ellipsis" aria-live="polite">{result ? t(total === 1 ? '{n} Result' : '{n} Results', { n: `${total.toLocaleString()}${total === SEARCH_RESULT_CAP ? '+' : ''}` }) : error ? t('Search') : t('Searching…')}</h2>
         <span className="spacer" />
         <label className="sr-only" htmlFor="search-sort">{t('Sort results')}</label>
         <select id="search-sort" className="input small-select" value={sort} onChange={(e) => (setSort(e.target.value as Sort), setPage(0))}>

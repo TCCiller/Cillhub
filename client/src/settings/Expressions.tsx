@@ -1,16 +1,16 @@
 // Server Settings > Emoji, Stickers and Soundboard managers (CONTRACT-v3 section 3).
 import { t } from '../i18n'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { createEmoji, createSound, createSticker, deleteEmoji, deleteSound, deleteSticker, loadSounds, updateEmoji } from '../actions'
+import { createEmoji, createSound, createSticker, deleteEmoji, deleteSound, deleteSticker, loadSounds, updateEmoji, updateSticker, updateSound } from '../actions'
 import { cdn, dataUri } from '../api'
 import { ask } from '../components/dialogs'
 import { FormError, Icon, ICONS } from '../components/ui'
 import { emojiUrl } from '../markdown/Markdown'
 import { canEditExpression, P, has } from '../permissions'
 import { usePerms } from '../selectors'
-import { apply, displayName, useStore } from '../store'
+import { apply, displayName, getState, useStore } from '../store'
 import type { Emoji, Guild, Sound, Sticker } from '../types'
-import type { Anchor } from '../components/menu'
+import { Popover, type Anchor } from '../components/menu'
 import { EmojiPicker } from '../emoji/EmojiPicker'
 import { EMOJI } from '../emoji/data'
 import { prepareSticker } from '../expressions/stickerFile'
@@ -70,6 +70,7 @@ export function EmojiPage({ guild }: { guild: Guild }) {
           <li key={e.id} className="expr-row">
             <img className="expr-img" src={emojiUrl(e.id!, e.animated)} alt="" />
             <EmojiName guildId={guild.id} e={e} editable={canEdit(e.user?.id)} onError={setError} />
+            <EmojiRoles guild={guild} emoji={e} editable={canEdit(e.user?.id)} />
             <span className="hint small ellipsis">{e.user ? displayName(e.user) : ''}</span>
             {canEdit(e.user?.id) && (
               <button className="icon-btn" aria-label={t('Delete emoji {name}', { name: e.name })} onClick={() => remove('Emoji', `:${e.name}:`, () => deleteEmoji(guild.id, e.id!).then(() => setList((guild.emojis ?? []).filter((x) => x.id !== e.id))), (err) => setError(err.message))}>
@@ -79,6 +80,58 @@ export function EmojiPage({ guild }: { guild: Guild }) {
           </li>
         ))}
       </ul>
+    </>
+  )
+}
+
+function EmojiRoles({ guild, emoji, editable }: { guild: Guild; emoji: Emoji; editable: boolean }) {
+  const [at, setAt] = useState<Anchor | null>(null)
+  const [selected, setSelected] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const roles = guild.roles.filter((role) => role.id !== guild.id)
+  const restriction = emoji.roles?.length
+    ? emoji.roles.map((id) => roles.find((role) => role.id === id)?.name ?? id).join(', ')
+    : t('Everyone')
+  const save = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const updated = await updateEmoji(guild.id, emoji.id!, { roles: selected })
+      apply('GUILD_EMOJIS_UPDATE', {
+        guild_id: guild.id,
+        emojis: (getState().guilds[guild.id]?.emojis ?? []).map((item) => item.id === emoji.id ? updated : item),
+      })
+      setAt(null)
+    } catch (err) { setError((err as Error).message) }
+    finally { setBusy(false) }
+  }
+  return (
+    <>
+      <span className="hint small ellipsis" title={restriction}>{restriction}</span>
+      {editable && <button className="secondary small-btn" aria-label={t('Roles for emoji {name}', { name: emoji.name })} aria-expanded={!!at}
+        onClick={(ev) => {
+          setSelected([...(emoji.roles ?? [])])
+          setError('')
+          setAt({ rect: ev.currentTarget.getBoundingClientRect(), side: 'below' })
+        }}>{t('Roles')}</button>}
+      {editable && at && (
+        <Popover at={at} onClose={() => !busy && setAt(null)} label={t('Roles for emoji {name}', { name: emoji.name })}>
+          <fieldset className="plain" disabled={busy}>
+            <legend className="field-label">{t('Roles')}</legend>
+            <div className="check-list">
+              {roles.map((role) => <label key={role.id}><input type="checkbox" checked={selected.includes(role.id)}
+                onChange={() => setSelected((ids) => ids.includes(role.id) ? ids.filter((id) => id !== role.id) : [...ids, role.id])} /> {role.name}</label>)}
+            </div>
+          </fieldset>
+          <p className="hint small">{t('No roles selected means everyone can use this emoji.')}</p>
+          <FormError error={error} />
+          <div className="modal-actions">
+            <button className="secondary" disabled={busy} onClick={() => setAt(null)}>{t('Cancel')}</button>
+            <button className="primary" disabled={busy} onClick={() => void save()}>{t('Save')}</button>
+          </div>
+        </Popover>
+      )}
     </>
   )
 }
@@ -96,6 +149,39 @@ function EmojiName({ guildId, e, editable, onError }: { guildId: string; e: Emoj
   return (
     <input className="input expr-name" aria-label={t('Name of emoji {name}', { name: e.name })} aria-invalid={!valid || undefined} maxLength={32} value={name}
       onChange={(ev) => setName(ev.target.value)} onBlur={commit} onKeyDown={(ev) => ev.key === 'Enter' && ev.currentTarget.blur()} />
+  )
+}
+
+function ExpressionName({ name: saved, editable, label, maxLength, save, onError }: {
+  name: string; editable: boolean; label: string; maxLength: number
+  save: (name: string) => Promise<unknown>; onError: (message: string) => void
+}) {
+  const [name, setName] = useState(saved)
+  const [busy, setBusy] = useState(false)
+  const saving = useRef(false)
+  useEffect(() => setName(saved), [saved])
+  const commit = async () => {
+    const next = name.trim()
+    if (saving.current || next === saved) { setName(saved); return }
+    saving.current = true
+    setBusy(true)
+    onError('')
+    try {
+      await save(next)
+      setName(next)
+    } catch (err) {
+      onError((err as Error).message)
+      setName(saved)
+    } finally {
+      saving.current = false
+      setBusy(false)
+    }
+  }
+  if (!editable) return <span className="expr-name ellipsis">{saved}</span>
+  return (
+    <input className="input expr-name" aria-label={label} minLength={2} maxLength={maxLength} disabled={busy}
+      aria-invalid={name.trim().length < 2 || undefined} value={name} onChange={(ev) => setName(ev.target.value)}
+      onBlur={() => void commit()} onKeyDown={(ev) => { if (ev.key === 'Enter') { ev.preventDefault(); ev.currentTarget.blur() } }} />
   )
 }
 
@@ -174,7 +260,8 @@ export function StickersPage({ guild }: { guild: Guild }) {
         {list.map((s) => (
           <li key={s.id} className="sticker-card">
             <img src={stickerUrl(s)} alt={s.name} />
-            <span className="expr-name ellipsis">{s.name}</span>
+            <ExpressionName name={s.name} editable={canEdit(s.user?.id)} label={t('Name of sticker {name}', { name: s.name })} maxLength={30} onError={setError}
+              save={(name) => updateSticker(guild.id, s.id, { name }).then((updated) => setList((getState().guilds[guild.id]?.stickers ?? []).map((x) => x.id === s.id ? updated : x)))} />
             <span className="hint small">{emojiForTags(s.tags)}</span>
             {canEdit(s.user?.id) && (
               <button className="icon-btn" aria-label={t('Delete sticker {name}', { name: s.name })} onClick={() => remove('Sticker', s.name, () => deleteSticker(guild.id, s.id).then(() => setList((guild.stickers ?? []).filter((x) => x.id !== s.id))), (err) => setError(err.message))}>
@@ -255,7 +342,8 @@ export function SoundboardPage({ guild }: { guild: Guild }) {
         {list?.map((s) => (
           <li key={s.sound_id} className="expr-row">
             <span className="expr-img sound-emoji" aria-hidden="true">{s.emoji_id ? <img src={emojiUrl(s.emoji_id)} alt="" /> : s.emoji_name ?? '🔊'}</span>
-            <span className="expr-name">{s.name}</span>
+            <ExpressionName name={s.name} editable={canEdit(s.user?.id)} label={t('Name of sound {name}', { name: s.name })} maxLength={32} onError={setError}
+              save={(name) => updateSound(guild.id, s.sound_id, { name })} />
             <span className="hint small">{Math.round(s.volume * 100)}%</span>
             <button className="icon-btn" aria-label={t('Preview {name}', { name: s.name })} onClick={() => playSound(s)}><Icon d={ICONS.play} size={16} /></button>
             {canEdit(s.user?.id) && (

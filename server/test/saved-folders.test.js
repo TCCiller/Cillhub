@@ -85,3 +85,63 @@ test('saved folders and message tags: CRUD folders, assign message to folder wit
   assert.equal(targetAfter.save_data.folder_id, null);
   assert.deepEqual(targetAfter.save_data.tags, ['work', 'q3-report', 'urgent']);
 });
+
+test('saved folders and message tags enforce type, length and count bounds', async () => {
+  const maxName = 'f'.repeat(64);
+  const overName = 'f'.repeat(65);
+
+  for (const badName of [undefined, null, '', '   ', 123, { name: 'obj' }, ['arr'], overName]) {
+    const res = await api('POST', '/users/@me/saved-folders', alice.token, { name: badName });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 50035);
+  }
+
+  const first = await api('POST', '/users/@me/saved-folders', alice.token, { name: `  ${maxName}  ` });
+  assert.equal(first.status, 201);
+  assert.equal(first.body.name, maxName);
+
+  for (const badName of [null, '', '   ', 123, { name: 'obj' }, ['arr'], overName]) {
+    const res = await api('PATCH', `/users/@me/saved-folders/${first.body.id}`, alice.token, { name: badName });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 50035);
+  }
+  assert.equal((await api('GET', '/users/@me/saved-folders', alice.token)).body[0].name, maxName);
+
+  const renamed = await api('PATCH', `/users/@me/saved-folders/${first.body.id}`, alice.token, { name: 'Folder 1' });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.body.name, 'Folder 1');
+
+  for (let i = 2; i <= 50; i++) {
+    const res = await api('POST', '/users/@me/saved-folders', alice.token, { name: `Folder ${i}` });
+    assert.equal(res.status, 201);
+  }
+  const overCap = await api('POST', '/users/@me/saved-folders', alice.token, { name: 'Folder 51' });
+  assert.equal(overCap.status, 400);
+  assert.equal(overCap.body.code, 50035);
+  assert.equal((await api('GET', '/users/@me/saved-folders', alice.token)).body.length, 50);
+
+  // Per-user cap does not block another user from creating folders
+  const bobFolder = await api('POST', '/users/@me/saved-folders', bob.token, { name: 'Bob Folder' });
+  assert.equal(bobFolder.status, 201);
+
+  const msg = (await api('POST', `/channels/${g.general.id}/messages`, bob.token, { content: 'Tag bounds test' })).body;
+  await api('PUT', `/users/@me/saved-messages/${g.general.id}/${msg.id}`, alice.token, {});
+
+  const maxTag = 't'.repeat(32);
+  const overTag = 't'.repeat(33);
+  const twentyTags = Array.from({ length: 20 }, (_, i) => `tag-${i}`);
+  const twentyOneTags = Array.from({ length: 21 }, (_, i) => `tag-${i}`);
+
+  for (const badTags of [null, 'tag', 123, {}, [''], ['   '], [123], [{}], [overTag], ['ok', overTag], twentyOneTags]) {
+    const res = await api('PATCH', `/users/@me/saved-messages/${msg.id}`, alice.token, { tags: badTags });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 50035);
+  }
+
+  const maxTagRes = await api('PATCH', `/users/@me/saved-messages/${msg.id}`, alice.token, {
+    tags: [`  ${maxTag}  `, ...twentyTags.slice(1)],
+  });
+  assert.equal(maxTagRes.status, 200);
+  assert.equal(maxTagRes.body.save_data.tags.length, 20);
+  assert.equal(maxTagRes.body.save_data.tags[0], maxTag);
+});

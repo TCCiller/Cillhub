@@ -1,15 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { get, all, run } from '../db.js';
-import { HttpError, notFound } from '../errors.js';
+import { HttpError, invalid, list, notFound, str } from '../errors.js';
 import { savedObj } from './later.js';
+
+const MAX_FOLDERS = 50;
+const MAX_FOLDER_NAME = 64;
+const MAX_TAGS = 20;
+const MAX_TAG_LENGTH = 32;
 
 function listFolders(ctx) {
   return all('SELECT * FROM saved_message_folders WHERE user_id = ? ORDER BY created_at ASC', ctx.user.id);
 }
 
 function createFolder(ctx) {
-  const name = String(ctx.body?.name || '').trim();
-  if (!name) throw new HttpError(400, 50035, 'Folder name is required');
+  const name = str(ctx.body ?? {}, 'name', 1, MAX_FOLDER_NAME);
+  const count = get('SELECT COUNT(*) AS n FROM saved_message_folders WHERE user_id = ?', ctx.user.id).n;
+  if (count >= MAX_FOLDERS) throw new HttpError(400, 50035, `Maximum of ${MAX_FOLDERS} folders reached`);
   const color = ctx.body?.color ? String(ctx.body.color).slice(0, 32) : null;
   const icon = ctx.body?.icon ? String(ctx.body.icon).slice(0, 64) : null;
   const id = randomUUID();
@@ -26,8 +32,7 @@ function updateFolder(ctx) {
   const folder = get('SELECT * FROM saved_message_folders WHERE id = ? AND user_id = ?', ctx.params.id, ctx.user.id);
   if (!folder) throw notFound(10008, 'Folder');
 
-  const name = ctx.body?.name !== undefined ? String(ctx.body.name).trim() : folder.name;
-  if (!name) throw new HttpError(400, 50035, 'Folder name cannot be empty');
+  const name = ctx.body?.name !== undefined ? str(ctx.body, 'name', 1, MAX_FOLDER_NAME) : folder.name;
   const color = ctx.body?.color !== undefined ? (ctx.body.color ? String(ctx.body.color).slice(0, 32) : null) : folder.color;
   const icon = ctx.body?.icon !== undefined ? (ctx.body.icon ? String(ctx.body.icon).slice(0, 64) : null) : folder.icon;
 
@@ -55,15 +60,18 @@ function updateSavedMessage(ctx) {
     if (ctx.body.folder_id === null || ctx.body.folder_id === '') {
       folderId = null;
     } else {
-      const folder = get('SELECT id FROM saved_message_folders WHERE id = ? AND user_id = ?', ctx.body.folder_id, ctx.user.id);
+      const folder = typeof ctx.body.folder_id === 'string'
+        && get('SELECT id FROM saved_message_folders WHERE id = ? AND user_id = ?', ctx.body.folder_id, ctx.user.id);
       if (!folder) throw notFound(10008, 'Folder');
       folderId = folder.id;
     }
   }
 
   let tags = saved.tags;
-  if (Array.isArray(ctx.body?.tags)) {
-    tags = JSON.stringify(ctx.body.tags.map(t => String(t).trim()).filter(Boolean));
+  if (ctx.body?.tags !== undefined) {
+    const rawTags = list(ctx.body, 'tags');
+    if (rawTags.length > MAX_TAGS) throw invalid('tags', 'BASE_TYPE_MAX_LENGTH', `At most ${MAX_TAGS} tags.`);
+    tags = JSON.stringify(rawTags.map(t => str({ tags: t }, 'tags', 1, MAX_TAG_LENGTH)));
   }
 
   run('UPDATE saved_messages SET folder_id = ?, tags = ? WHERE user_id = ? AND message_id = ?',

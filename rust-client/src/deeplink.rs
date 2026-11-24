@@ -13,20 +13,44 @@ pub enum DeepLinkTarget {
     AddNode(String),
 }
 
-pub fn deep_link_path(raw: &str) -> Option<String> {
-    let rest = DEEP_LINK_SCHEMES.iter().find_map(|s| {
+pub(crate) fn scheme_rest(raw: &str) -> Option<&str> {
+    DEEP_LINK_SCHEMES.iter().find_map(|s| {
         raw.get(..s.len() + 3)
             .filter(|p| p.eq_ignore_ascii_case(&format!("{s}://")))
             .map(|_| &raw[s.len() + 3..])
-    })?;
+    })
+}
+
+/// Picks the first command-line argument after `argv[0]` that starts with one of `DEEP_LINK_SCHEMES` (case-insensitively).
+pub fn deep_link_from_args<I, S>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .skip(1)
+        .find(|a| scheme_rest(a.as_ref()).is_some())
+        .map(|a| a.as_ref().to_string())
+}
+
+pub fn deep_link_path(raw: &str) -> Option<String> {
+    if raw.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let rest = scheme_rest(raw)?;
     let code = rest.strip_prefix("invite/")?.trim_end_matches('/');
     ((2..=32).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
         .then(|| format!("/invite/{code}"))
 }
 
 pub fn parse_deep_link(raw: &str) -> Option<DeepLinkTarget> {
-    if let Some(invite) = parse_game_invite(raw) {
-        return Some(DeepLinkTarget::GameInvite(invite));
+    if raw.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let rest = scheme_rest(raw)?;
+    if let Some(query) = rest.strip_prefix("game-invite?") {
+        let normalized = format!("cillhub://game-invite?{query}");
+        return parse_game_invite(&normalized).map(DeepLinkTarget::GameInvite);
     }
     if let Some(origin) = crate::nodes::parse_add_deep_link(raw) {
         return Some(DeepLinkTarget::AddNode(origin));
@@ -71,6 +95,44 @@ mod tests {
         assert_eq!(deep_link_path("cillhub://invite/../x"), None);
         assert_eq!(deep_link_path("cillhub://channels/1/2"), None);
         assert_eq!(deep_link_path("https://example.com/invite/abc"), None);
+    }
+
+    #[test]
+    fn deep_link_arg_selection_and_parsing() {
+        assert_eq!(
+            deep_link_from_args(["cillhub-desktop.exe", "--demo", "CILLHUB://invite/abc-123"]),
+            Some("CILLHUB://invite/abc-123".to_string())
+        );
+        assert_eq!(
+            deep_link_from_args(["cillhub-desktop.exe", "CiLlCoRd://add-node#https://node.example.org", "--demo"]),
+            Some("CiLlCoRd://add-node#https://node.example.org".to_string())
+        );
+        assert_eq!(
+            deep_link_from_args(["cillhub://invite/ignored-argv0", "--demo", "--sandbox", "https://example.com"]),
+            None
+        );
+
+        assert_eq!(
+            parse_deep_link("CILLHUB://game-invite?game=League+of+Legends&partyId=party-100"),
+            Some(DeepLinkTarget::GameInvite(GameInviteData {
+                game: "League of Legends".into(),
+                queue_name: "Custom Game".into(),
+                queue_id: None,
+                party_id: "party-100".into(),
+                host_name: "Host".into(),
+                host_puuid: None,
+                members: 1,
+                max_members: 5,
+            }))
+        );
+        assert_eq!(
+            parse_deep_link("cillhub://game-invite?game=League+of+Legends&partyId=party-100 --extra-flag"),
+            None
+        );
+        assert_eq!(
+            parse_deep_link("cillhub://add-node#https://node.example.org --extra-flag"),
+            None
+        );
     }
 
     #[test]

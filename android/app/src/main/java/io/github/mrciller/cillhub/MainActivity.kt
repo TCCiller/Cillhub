@@ -24,6 +24,7 @@ import io.github.mrciller.cillhub.ui.inPip
 import io.github.mrciller.cillhub.ui.pendingOpen
 import io.github.mrciller.cillhub.ui.voiceScreenShown
 import io.github.mrciller.cillhub.voice.Voice
+import java.security.MessageDigest
 import java.util.Locale
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
@@ -34,6 +35,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_PATH = "path"
+        const val EXTRA_PATH_TOKEN = "path_token"
         const val EXTRA_UPDATE = "update"
         const val EXTRA_SETTINGS = "settings"
         const val EXTRA_VOICE = "voice"
@@ -45,6 +47,15 @@ class MainActivity : ComponentActivity() {
         /** Opens the voice screen of a channel or call (notifications, the call service). */
         fun voiceIntent(ctx: Context, channelId: String): Intent = Intent(ctx, MainActivity::class.java).setAction(Intent.ACTION_VIEW)
             .putExtra(EXTRA_VOICE, channelId).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+
+        /** A path intent counts only with this install's secret (MainActivity is exported: any app can send EXTRA_PATH). */
+        fun openChannel(path: String?, token: String?, secret: String?): String? {
+            if (token == null || secret.isNullOrEmpty()) return null
+            if (!MessageDigest.isEqual(token.toByteArray(Charsets.UTF_8), secret.toByteArray(Charsets.UTF_8))) return null
+            return path?.let { PATH.matchEntire(it)?.groupValues?.get(2) }
+        }
+
+        fun pathAllowed(path: String?, token: String?, secret: String?): Boolean = openChannel(path, token, secret) != null
     }
 
     private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -132,8 +143,7 @@ class MainActivity : ComponentActivity() {
             pendingOpen.value = "voice:$id"
             return
         }
-        val m = i.getStringExtra(EXTRA_PATH)?.let { PATH.matchEntire(it) } ?: return
-        val channel = m.groupValues[2]
+        val channel = openChannel(i.getStringExtra(EXTRA_PATH), i.getStringExtra(EXTRA_PATH_TOKEN), Prefs(this).pathToken) ?: return
         Notifications.read(this, channel, null) // opened from its notification: that conversation counts as seen
         pendingOpen.value = channel
     }

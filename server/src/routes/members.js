@@ -172,6 +172,7 @@ function searchMembers({ params, query, user }) {
     SELECT u.*, m.guild_id, m.joined_at, m.nick, m.mute, m.deaf, m.pending, m.communication_disabled_until,
            m.avatar AS member_avatar, m.banner AS member_banner, m.bio AS member_bio, m.display_name_styles AS member_name_styles
     FROM members m JOIN users u ON u.id = m.user_id WHERE m.guild_id = ?`, g.id);
+  const rolesByUser = Map.groupBy(all('SELECT user_id, role_id FROM member_roles WHERE guild_id = ?', g.id), r => r.user_id);
   const results = [];
   const now = Date.now();
 
@@ -180,7 +181,7 @@ function searchMembers({ params, query, user }) {
     if (q && !row.username.toLowerCase().includes(q) && !(row.global_name && row.global_name.toLowerCase().includes(q)) && !nick.toLowerCase().includes(q)) {
       continue;
     }
-    const roles = all('SELECT role_id FROM member_roles WHERE guild_id = ? AND user_id = ?', g.id, row.id).map(r => r.role_id);
+    const roles = (rolesByUser.get(row.id) ?? []).map(r => r.role_id);
     if (roleFilter && !roleFilter.some(r => roles.includes(r))) {
       continue;
     }
@@ -191,7 +192,7 @@ function searchMembers({ params, query, user }) {
       if (accountAgeDays > 7 && row.avatar) continue;
     }
 
-    const mObj = memberObj(row);
+    const mObj = memberObj(row, roles);
     results.push({
       ...mObj,
       safety_signals: {

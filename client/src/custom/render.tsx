@@ -2,6 +2,8 @@
 // decorations, nameplates, profile effects and profile themes. All decorations and badges are our own SVG/CSS.
 import type { CSSProperties, ReactNode } from 'react'
 import { cdn } from '../api'
+import { MotionImg } from '../appearance/MotionImg'
+import { reducedMotion } from '../appearance/apply'
 import { t } from '../i18n'
 import { sortedRoles } from '../permissions'
 import { getState, useStore } from '../store'
@@ -129,12 +131,12 @@ export const decorationUrl = (asset: string) => (asset.startsWith('data:') ? ass
 export const isBuiltin = (d: { sku_id: string }) => d.sku_id === '0' || !/^\d+$/.test(d.sku_id)
 /** The frame around an avatar: a built-in SVG, or a server's uploaded APNG/WebP. */
 export function Decoration({ data }: { data?: User['avatar_decoration_data'] }) {
+  const reduced = reducedMotion(useStore((s) => s.settings))
   if (!data?.asset) return null
   const builtin = isBuiltin(data) ? DECORATIONS.find((d) => d.id === data.asset) : undefined
   if (builtin) return <svg className="deco" viewBox="0 0 120 120" aria-hidden="true">{builtin.svg}</svg>
   if (isBuiltin(data)) return null
-  // shortcut: uploaded APNG/WebP decorations keep animating under reduced motion; draw a still (as MotionImg does) if asked
-  return <img className="deco" src={decorationUrl(data.asset)} alt="" aria-hidden="true" draggable={false} />
+  return <MotionImg motion={reduced ? 'never' : 'always'} className="deco" src={decorationUrl(data.asset)} alt="" aria-hidden="true" draggable={false} />
 }
 
 // ---------- nameplates ----------

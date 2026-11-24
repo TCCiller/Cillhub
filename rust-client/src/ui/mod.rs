@@ -562,18 +562,17 @@ impl CillhubApp {
                 self.selected_channel_id = None;
             }
             match target {
+                // shown first: only the user's click on Join accepts it
                 DeepLinkTarget::Invite(code) => {
                     self.join_invite_code_input = code;
-                    self.join_invite_code();
+                    self.active_modal = Some(ModalKind::CreateJoinGuild);
                 }
                 // shown first: only the user's click on Join accepts it
                 DeepLinkTarget::GameInvite(invite) => self.pending_game_invite = Some(invite),
                 // shown first: only the user's click on Add saves it
                 DeepLinkTarget::AddNode(origin) => {
-                {
                     self.add_dialog_gen += 1;
-                    self.pending_add_node = Some(crate::nodes::PendingNode { origin, check: None, added: false, error: None })
-                }
+                    self.pending_add_node = Some(crate::nodes::PendingNode { origin, check: None, added: false, error: None });
                 }
             }
         }
@@ -659,6 +658,7 @@ impl CillhubApp {
         self.canvas_cid = None;
         self.row_heights = Default::default();
         self.custom_status_input.clear();
+        self.join_invite_code_input.clear();
         self.pending_game_invite = None;
         self.confirm_remove_node = None;
         self.show_composer_plus_menu = false;
@@ -2878,5 +2878,48 @@ mod tests {
             app.headless_tick(ctx);
         });
         assert!(!out_voice.shapes.is_empty());
+    }
+
+    #[test]
+    fn invite_deep_link_waits_for_confirmation_before_joining() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, false);
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 800.0),
+        ));
+
+        let (origin, hub) = fake_hub(
+            r#"{"id":"g_invited","name":"Invited Squad","channels":[{"id":"c_welcome","type":0,"guild_id":"g_invited","name":"welcome"}]}"#,
+            1,
+        );
+        let mut app = CillhubApp::new(None, true);
+        settle(&mut app);
+        app.api = Some(ApiClient::new(origin, Some("hub-token".into())));
+
+        // 1. Opening an invite deep link only pre-fills and shows the join dialog; no request is sent.
+        app.handle_deep_link("cillhub://invite/abc-123");
+        assert_eq!(app.join_invite_code_input, "abc-123");
+        assert_eq!(app.active_modal, Some(ModalKind::CreateJoinGuild));
+        assert_eq!(app.bg.pending, 0, "handle_deep_link must not send a request");
+
+        let out = ctx.run(input, |ctx| {
+            app.headless_tick(ctx);
+        });
+        assert!(!out.shapes.is_empty());
+        settle(&mut app);
+        assert!(!app.state.guilds.contains_key("g_invited"), "rendering the confirmation modal must not auto-join");
+
+        // 2. Confirming in the join dialog sends POST /invites/abc-123 and joins the server.
+        app.join_invite_code();
+        app.active_modal = None;
+        settle(&mut app);
+
+        let seen = hub.join().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].starts_with("POST /api/v9/invites/abc-123 "), "{seen:?}");
+        assert!(app.state.guilds.contains_key("g_invited"));
+        assert_eq!(app.selected_guild_id.as_deref(), Some("g_invited"));
     }
 }

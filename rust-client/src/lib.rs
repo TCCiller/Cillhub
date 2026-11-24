@@ -123,11 +123,7 @@ pub fn run_desktop_app() -> Result<(), String> {
     }
 
     let demo_mode = args.iter().any(|a| a == "--demo" || a == "--sandbox");
-    let deep_link = args
-        .iter()
-        .skip(1)
-        .find(|a| a.starts_with("cillhub://") || a.starts_with("cillcord://"))
-        .cloned();
+    let deep_link = crate::deeplink::deep_link_from_args(&args);
 
     let settings = crate::settings::AppSettings::load();
     let width = (settings.bounds.width as f32).max(940.0);

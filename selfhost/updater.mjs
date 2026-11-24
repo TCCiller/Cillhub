@@ -12,6 +12,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -126,10 +127,15 @@ export function verifyFeed(body, sig, keys, floor, now = Date.now()) {
   const key = typeof j?.key_id === 'string' && keys.get(j.key_id);
   if (!key) throw new Error(`latest.json: signed by a key this node does not trust (${String(j?.key_id).slice(0, 16)})`);
   if (!crypto.verify(null, body, key, sig)) throw new Error('latest.json: signature does not verify');
-  if (!VERSION_RE.test(j.version) || !/^[0-9a-f]{64}$/.test(j.sha256) || !Number.isSafeInteger(j.size)
-    || typeof j.url !== 'string' || !(j.url.startsWith('https://') || j.url.startsWith(`${HUB}/download/server/`)) || (j.min_upgrade_from && !VERSION_RE.test(j.min_upgrade_from))
+  const hub = (env.CILLCORD_HUB_URL || HUB).replace(/\/+$/, '');
+  if (typeof j.version !== 'string' || !VERSION_RE.test(j.version)
+    || typeof j.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(j.sha256)
+    || !Number.isSafeInteger(j.size) || j.size <= 0
+    || typeof j.url !== 'string' || !(j.url.startsWith('https://') || (Boolean(hub) && j.url.startsWith(`${hub}/download/server/`)))
+    || (j.min_upgrade_from != null && (typeof j.min_upgrade_from !== 'string' || !VERSION_RE.test(j.min_upgrade_from)))
     || (j.security !== undefined && typeof j.security !== 'boolean') || !Number.isSafeInteger(j.expires)
-    || (j.min_version && !VERSION_RE.test(j.min_version)) || (j.keys !== undefined && !(Array.isArray(j.keys) && j.keys.every((k) => parseKeys(k).size === 1)))) throw new Error('latest.json: malformed');
+    || (j.min_version != null && (typeof j.min_version !== 'string' || !VERSION_RE.test(j.min_version)))
+    || (j.keys !== undefined && !(Array.isArray(j.keys) && j.keys.every((k) => parseKeys(k).size === 1)))) throw new Error('latest.json: malformed');
   // a new key list must keep the key that signed this feed, so no feed can lock its own signer (the owner's key) out for good
   if (j.keys && !j.keys.some((k) => parseKeys(k).has(j.key_id))) throw new Error('latest.json: the key list drops the key that signed it');
   if (j.expires * 1000 <= now) throw new Error(`latest.json: expired on ${new Date(j.expires * 1000).toISOString()}; the hub has to re-sign it`);
@@ -325,13 +331,21 @@ async function rollback() {
 
 // ---- HTTP interface for the app
 const PRIVATE = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|f[cd][0-9a-f]{2}:)/i;
+export function isPrivate(remoteAddress) {
+  const raw = String(remoteAddress || '');
+  if (!net.isIP(raw)) return false;
+  const addr = raw.replace(/^::ffff:/i, '');
+  return Boolean(net.isIP(addr)) && PRIVATE.test(addr);
+}
 const digest = (s) => crypto.createHash('sha256').update(s).digest();
-const authorized = (req) => crypto.timingSafeEqual(digest(req.headers.authorization || ''), digest(`Bearer ${SECRET}`));
+const authorized = (req) => {
+  const s = env.CILLCORD_UPDATER_SECRET || SECRET;
+  return s.length >= 32 && crypto.timingSafeEqual(digest(req.headers?.authorization || ''), digest(`Bearer ${s}`));
+};
 
-async function handle(req, res) {
+export async function handle(req, res) {
   const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
-  const addr = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
-  if (!PRIVATE.test(addr)) return send(403, { error: 'local network only' });
+  if (!isPrivate(req.socket?.remoteAddress)) return send(403, { error: 'local network only' });
   if (!authorized(req)) return send(401, { error: 'unauthorized' });
   const url = new URL(req.url, 'http://updater');
   const route = `${req.method} ${url.pathname}`;

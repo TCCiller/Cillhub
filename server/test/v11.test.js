@@ -172,6 +172,37 @@ test('Task 6.6 & 6.16: Polls with anonymous voting, role restrictions, and quiz 
   assert.equal(bobViewAfter.poll.correct_answer_id, 2);
 });
 
+test('quiz votes are final and empty votes do not reveal the answer', async () => {
+  for (const quiz of [true, false]) {
+    const created = await api('POST', `/channels/${g.general.id}/messages`, alice.token, {
+      poll: {
+        question: { text: 'Choose an answer' },
+        answers: [{ poll_media: { text: 'A' } }, { poll_media: { text: 'B' } }],
+        ...(quiz && { correct_answer_id: 2 }),
+      },
+    });
+    assert.equal(created.status, 201);
+    const mid = created.body.id;
+    const vote = answer_ids => api('PUT', `/channels/${g.general.id}/polls/${mid}/answers/@me`, bob.token, { answer_ids });
+    const view = async () => (await api('GET', `/channels/${g.general.id}/messages/${mid}`, bob.token)).body.poll;
+    const empty = await vote([]);
+    assert.equal(empty.status, 204);
+    assert.equal(empty.body?.correct_answer_id, undefined);
+    assert.equal((await view()).correct_answer_id, null);
+    const first = await vote([1]);
+    assert.equal(first.status, quiz ? 200 : 204);
+    if (quiz) assert.equal(first.body.correct_answer_id, 2);
+    assert.equal((await vote([1])).status, quiz ? 200 : 204, 'same vote is idempotent');
+    for (const answers of [[2], []]) {
+      const changed = await vote(answers);
+      assert.equal(changed.status, quiz ? 400 : 204);
+      const poll = await view();
+      assert.deepEqual(poll.results.answer_counts.filter(a => a.me_voted).map(a => a.id), quiz ? [1] : answers);
+      assert.equal(poll.results.answer_counts.reduce((sum, a) => sum + a.count, 0), quiz ? 1 : answers.length);
+    }
+  }
+});
+
 test('Task 6.7: User data export', async () => {
   const res = await api('GET', '/users/@me/export', alice.token);
   assert.equal(res.status, 200);

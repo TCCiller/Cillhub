@@ -64,6 +64,9 @@ function vote(ctx) {
   if (ids.some(id => !valid.has(id))) throw invalid('answer_ids', 'BASE_TYPE_CHOICES', 'Unknown answer.');
   if (ids.length > 1 && !p.allow_multiselect) throw invalid('answer_ids', 'BASE_TYPE_MAX_LENGTH', 'This poll allows one answer.');
   const before = all('SELECT answer_id FROM poll_votes WHERE message_id = ? AND user_id = ?', m.id, ctx.user.id).map(r => r.answer_id);
+  if (p.correct_answer_id != null && before.length && (ids.length !== before.length || ids.some(id => !before.includes(id)))) {
+    throw invalid('answer_ids', 'BASE_TYPE_CHOICES', 'Quiz votes cannot be changed or removed.');
+  }
   const event = answer_id => ({ user_id: ctx.user.id, channel_id: ch.id, message_id: m.id, guild_id: ch.guild_id ?? undefined, answer_id });
   const viewers = viewersOf(ch);
   const otherViewers = viewers.filter(id => id !== ctx.user.id);
@@ -93,7 +96,7 @@ function vote(ctx) {
       }
     }
   }
-  if (p.correct_answer_id != null) {
+  if (p.correct_answer_id != null && ids.length) {
     return { correct_answer_id: p.correct_answer_id };
   }
 }

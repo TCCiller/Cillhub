@@ -8,6 +8,7 @@ import { Field, FormError, Modal } from '../components/ui'
 import { getLocale, intlLocale, t } from '../i18n'
 import { Markdown, type MdContext } from '../markdown/Markdown'
 import { Link } from '../router'
+import { decodePart } from '../routerDecode'
 import { useStore } from '../store'
 import { useInstance } from '../admin/instance'
 import { logout } from '../gateway'
@@ -175,7 +176,7 @@ export function ReportContentPage() {
   )
 }
 
-const code = () => decodeURIComponent(location.hash.slice(1))
+const code = () => decodePart(location.hash.slice(1))
 
 export function NoticeStatusPage() {
   const [s, setS] = useState<L.NoticeStatus | null>(null)

@@ -126,8 +126,14 @@ export function reactionEmoji(key) {
   return { id: key, name: e?.name ?? null, ...(e?.animated && { animated: true }) };
 }
 
-// every user sees reactions, votes and thread membership as their own, so payloads are rendered per recipient
-export const broadcastMessage = (ch, t, m, extra) => sendToUsers(viewersOf(ch), t, uid => ({ ...messageObj(m, ch, uid), ...extra }));
+const hasViewerState = m => Boolean(m && (m.reactions || m.poll || m.thread));
+
+// every user sees reactions, votes and thread membership as their own; plain messages share one payload
+export function broadcastMessage(ch, t, m, extra) {
+  const shared = { ...messageObj(m, ch, null), ...extra };
+  const perViewer = hasViewerState(shared) || hasViewerState(shared.referenced_message);
+  sendToUsers(viewersOf(ch), t, perViewer ? uid => ({ ...messageObj(m, ch, uid), ...extra }) : shared);
+}
 
 export function deleteMessages(rows) {
   const pinnedChannels = new Set(), files = [];

@@ -111,14 +111,13 @@ import io.github.mrciller.cillhub.data.State
 import io.github.mrciller.cillhub.data.Upload
 import io.github.mrciller.cillhub.data.isPrivate
 import io.github.mrciller.cillhub.data.isThread
-import io.github.mrciller.cillhub.data.json
 import kotlinx.coroutines.channels.Channel as Events
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonObject
 import java.time.LocalDate
 
 /** A picked file waiting to be sent. */
@@ -242,7 +241,7 @@ fun ChatScreen(channelId: String, showBack: Boolean) {
     // a channel we do not know yet (deep link before READY, or not in READY): fetch it once the session is up
     LaunchedEffect(channelId, state.conn) {
         if (ch == null && state.conn == Conn.READY) try {
-            Session.store.dispatch("CHANNEL_CREATE", json.parseToJsonElement(Session.rest.request("GET", "/channels/$channelId")).jsonObject)
+            Session.store.dispatch("CHANNEL_CREATE", Session.rest.get<JsonObject>("/channels/$channelId"))
         } catch (e: Exception) { missing = true }
     }
     if (ch == null) { if (missing) EmptyState(R.drawable.ms_error, s(R.string.channel_unavailable)) else Loading(); return }

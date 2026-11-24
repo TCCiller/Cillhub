@@ -59,9 +59,13 @@ else
     if command -v dash >/dev/null; then check "dash -n $(basename "$f")" dash -n "$f"; fi
   done
 fi
+check "installer private data directory unit test" node --test "$SELFHOST/test/install-data.test.mjs"
 check "node --check updater.mjs" node --check "$SELFHOST/updater.mjs"
 check "updater feed unit tests (key list, expiry, minimum version)" node --test "$SELFHOST/test/updater-feed.test.mjs"
 check "updater backup pruning unit test" node --test "$SELFHOST/test/updater-backups.test.mjs"
+check "updater database restore refuses a planted link (no chown through it)" node --test "$SELFHOST/test/updater-restore.test.mjs"
+check "updater database snapshot binds path and refuses symbolic links" node --test "$SELFHOST/test/updater-snapshot.test.mjs"
+check "updater swap revert resilience and safe backup folder names" node --test "$SELFHOST/test/updater-revert.test.mjs"
 check "updater HTTP gate and feed field unit tests" node --test "$SELFHOST/test/updater-gate.test.mjs"
 mkdir -p "$T/c" && cp "$SELFHOST/docker-compose.yml" "$T/c/" &&
   printf 'CILLCORD_IMAGE=x\nCILLCORD_HTTP_PORT=1\nCILLVOICE_UDP_PORT=2\nCILLCORD_HOSTNAME=h\nLIVEKIT_API_KEY=k\nLIVEKIT_API_SECRET=s\n' > "$T/c/.env"

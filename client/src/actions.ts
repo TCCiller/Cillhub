@@ -7,6 +7,8 @@ import { navigate } from './router'
 import { permsOf } from './selectors'
 import { apply, emojiKey, getState, mergeSettings, replaceToken, setMyVotes, setState } from './store'
 import * as E from './e2ee/session'
+import { replaceWindow, sortById, windowToken, withNewer, withOlder } from './chat/messageWindow'
+import { withMembers } from './members'
 import type {
   Activity, Application, AuditLog, AuthSession, AutoModRule, Channel, ChannelCanvas, CommandIndex, CustomStatus, Draft, Emoji, FavoriteGif, Gif, Guild, GuildAnalytics, GuildOnboarding, GuildPayload, Invite, Member,
   MemberVerification, Message, MessageEdit, OnboardingPrompt, Profile, Role, ScheduledEvent, Snippet, Sound, StageInstance, Status, Sticker, ThreadMember, User, UserGuildSettings, UserSettings,
@@ -20,26 +22,21 @@ function rows<T>(x: T[], ok = (v: any) => typeof v?.id === 'string'): T[] {
   if (Array.isArray(x) && x.every(ok)) return x
   throw new ApiError(0, null)
 }
-const sortById = (list: Message[]) => [...list].sort((a, b) => (a.id.length - b.id.length) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-
 export async function loadMessages(channelId: string, before?: string) {
   // Mark as loaded first so live MESSAGE_CREATEs during the fetch are kept and merged.
   if (!before && !getState().messages[channelId]) setState((s) => ({ messages: { ...s.messages, [channelId]: [] } }))
+  const token = windowToken(channelId)
   const page = rows(await api<Message[]>(`/channels/${channelId}/messages?limit=${PAGE}${before ? `&before=${before}` : ''}`))
-  setState((s) => {
-    const list = s.messages[channelId] ?? []
-    const ids = new Set(list.map((m) => m.id))
-    return {
-      messages: { ...s.messages, [channelId]: [...sortById(page).filter((m) => !ids.has(m.id)), ...list] },
-      hasMore: { ...s.hasMore, [channelId]: page.length === PAGE },
-    }
-  })
+  const next = withOlder(channelId, getState().messages[channelId], page, before, token)
+  if (!next) return // the window changed meanwhile (a jump, or live messages trimmed it): this page would land out of place
+  setState((s) => ({ messages: { ...s.messages, [channelId]: next }, hasMore: { ...s.hasMore, [channelId]: page.length === PAGE } }))
 }
 
 /** Replaces the loaded window with the messages around `messageId` (search results, replies not loaded yet), then scrolls to it. */
 export async function loadAround(channelId: string, messageId: string) {
   const page = sortById(rows(await api<Message[]>(`/channels/${channelId}/messages?limit=${PAGE}&around=${messageId}`)))
   const last = getState().channels[channelId]?.last_message_id
+  replaceWindow(channelId)
   setState((s) => ({
     messages: { ...s.messages, [channelId]: page },
     hasMore: { ...s.hasMore, [channelId]: page.length > 0 },
@@ -53,19 +50,15 @@ export async function loadNewer(channelId: string) {
   const list = getState().messages[channelId]
   const after = list?.filter((m) => !m.pending && !m.failed).at(-1)?.id
   if (!after) return
-  const page = sortById(rows(await api<Message[]>(`/channels/${channelId}/messages?limit=${PAGE}&after=${after}`)))
-  setState((s) => {
-    const cur = s.messages[channelId] ?? []
-    const ids = new Set(cur.map((m) => m.id))
-    return {
-      messages: { ...s.messages, [channelId]: [...cur, ...page.filter((m) => !ids.has(m.id))] },
-      hasNewer: { ...s.hasNewer, [channelId]: page.length === PAGE },
-    }
-  })
+  const page = rows(await api<Message[]>(`/channels/${channelId}/messages?limit=${PAGE}&after=${after}`))
+  const next = withNewer(getState().messages[channelId], page, after)
+  if (!next) return
+  setState((s) => ({ messages: { ...s.messages, [channelId]: next }, hasNewer: { ...s.hasNewer, [channelId]: page.length === PAGE } }))
 }
 
 /** "Jump to Present": drops the jumped-to window and loads the latest page. */
 export function jumpToPresent(channelId: string) {
+  replaceWindow(channelId)
   setState((s) => ({ messages: Object.fromEntries(Object.entries(s.messages).filter(([k]) => k !== channelId)), hasNewer: { ...s.hasNewer, [channelId]: false } }))
   return loadMessages(channelId)
 }
@@ -286,9 +279,18 @@ export function ackMessage(channelId: string, messageId: string) {
 export async function loadMembers(guildId: string) {
   const list = rows(await api<Member[]>(`/guilds/${guildId}/members?limit=1000`), (m) => typeof m?.user?.id === 'string')
   setState((s) => ({
-    members: { ...s.members, [guildId]: Object.fromEntries(list.map((m) => [m.user.id, m])) },
+    members: withMembers(s.members, guildId, list),
     membersLoaded: { ...s.membersLoaded, [guildId]: true },
     users: { ...s.users, ...Object.fromEntries(list.map((m) => [m.user.id, m.user])) },
+  }))
+}
+
+export async function loadMyMember(guildId: string) {
+  const m = await api<Member>(`/guilds/${guildId}/members/@me`)
+  if (typeof m?.user?.id !== 'string') throw new ApiError(0, null)
+  setState((s) => ({
+    members: withMembers(s.members, guildId, [m]),
+    users: { ...s.users, [m.user.id]: m.user },
   }))
 }
 

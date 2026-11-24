@@ -109,4 +109,25 @@ class GatewayProtocolTest {
         assertEquals(GatewayProtocol.Action.NONE, p.onText("not json"))
         assertTrue(events.isEmpty())
     }
+
+    @Test fun heartbeatIntervalIsBounded() {
+        p.onText("""{"op":10,"d":{"heartbeat_interval":41250}}""")
+        assertEquals(41_250L, p.heartbeatMs)
+
+        p.onText("""{"op":10,"d":{"heartbeat_interval":0}}""")
+        assertEquals(41_250L, p.heartbeatMs)
+
+        p.onText("""{"op":10,"d":{"heartbeat_interval":-5}}""")
+        assertEquals(41_250L, p.heartbeatMs)
+
+        p.onText("""{"op":10,"d":{}}""")
+        assertEquals(41_250L, p.heartbeatMs)
+
+        p.onText("""{"op":10,"d":{"heartbeat_interval":1}}""")
+        assertEquals(1_000L, p.heartbeatMs)
+
+        p.onText("""{"op":10,"d":{"heartbeat_interval":999999999999}}""")
+        assertTrue("huge interval must be capped", p.heartbeatMs in 1_000L..300_000L)
+        assertTrue("huge interval must be capped below input", p.heartbeatMs < 999_999_999_999L)
+    }
 }

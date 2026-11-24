@@ -12,6 +12,17 @@ use sha2::{Digest, Sha512};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "native-net")]
+const FEED_MAX: u64 = 1024 * 1024;
+#[cfg(feature = "native-net")]
+const SIGNATURE_MAX: u64 = 1024;
+#[cfg(feature = "native-net")]
+const INSTALLER_MAX: u64 = 1024 * 1024 * 1024;
+#[cfg(feature = "native-net")]
+const FEED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(feature = "native-net")]
+const INSTALLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 pub const PINNED_KEYS: &str = include_str!("../../selfhost/release-public-key.pem");
 
 pub struct Feed {
@@ -114,7 +125,7 @@ pub fn fetch_update(base: &str, current: &str) -> Result<Option<Staged>, String>
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(None)
+        .timeout(FEED_TIMEOUT)
         .build()
         .map_err(|e| e.to_string())?;
     let get = |url: String| {
@@ -125,7 +136,8 @@ pub fn fetch_update(base: &str, current: &str) -> Result<Option<Staged>, String>
             .map_err(|e| e.to_string())
     };
     let feed_name = if cfg!(windows) { "native-latest.yml" } else { "native-latest-linux.yml" };
-    let yml = get(format!("{base}{feed_name}"))?.text().map_err(|e| e.to_string())?;
+    let body = read_capped(get(format!("{base}{feed_name}"))?, FEED_MAX)?;
+    let yml = String::from_utf8_lossy(&body);
     let feed = parse_feed(&yml).ok_or("feed has no version")?;
     if !is_newer(&feed.version, current) {
         return Ok(None);
@@ -137,8 +149,8 @@ pub fn fetch_update(base: &str, current: &str) -> Result<Option<Staged>, String>
     let dest = dir.join(&file);
     let sha = download(&client, &format!("{base}{file}"), &dest, |_| {});
     let sig = sha.and_then(|sha| {
-        let sig = get(format!("{base}{file}.sig"))?.bytes().map_err(|e| e.to_string())?;
-        accept(&feed, &file, &sha, &sig, PINNED_KEYS, current).map(|_| (sha, sig.to_vec()))
+        let sig = read_capped(get(format!("{base}{file}.sig"))?, SIGNATURE_MAX)?;
+        accept(&feed, &file, &sha, &sig, PINNED_KEYS, current).map(|_| (sha, sig))
     });
     match sig {
         Ok((sha512_hex, sig)) => Ok(Some(Staged { version: feed.version, path: dest, sha512_hex, sig })),
@@ -251,46 +263,78 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(feature = "native-net")]
+fn read_capped(reader: impl Read, cap: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > cap {
+        return Err(format!("update response exceeds {cap} bytes"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(feature = "native-net")]
 pub fn download(
     client: &reqwest::blocking::Client,
     url: &str,
     dest: &Path,
-    mut progress: impl FnMut(u32),
+    progress: impl FnMut(u32),
 ) -> Result<String, String> {
-    let mut resp = client
+    let resp = client
         .get(url)
+        .timeout(INSTALLER_TIMEOUT)
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|e| e.to_string())?;
     let total = resp.content_length().unwrap_or(0);
+    download_body(resp, dest, total, INSTALLER_MAX, progress)
+}
+
+#[cfg(feature = "native-net")]
+fn download_body(
+    mut reader: impl Read,
+    dest: &Path,
+    total: u64,
+    cap: u64,
+    mut progress: impl FnMut(u32),
+) -> Result<String, String> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true); // never follows or reuses an existing file
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let mut file = opts.open(dest).map_err(|e| e.to_string())?;
-    let mut h = Sha512::new();
-    let mut buf = [0u8; 64 * 1024];
-    let (mut done, mut last) = (0u64, u32::MAX);
-    loop {
-        let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
+    let result = (|| {
+        let mut h = Sha512::new();
+        let mut buf = [0u8; 64 * 1024];
+        let (mut done, mut last) = (0u64, u32::MAX);
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            done += n as u64;
+            if done > cap {
+                return Err(format!("installer exceeds {cap} bytes"));
+            }
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            h.update(&buf[..n]);
+            let pct = if total > 0 {
+                (done * 100 / total) as u32
+            } else {
+                0
+            };
+            if pct != last {
+                last = pct;
+                progress(pct);
+            }
         }
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        h.update(&buf[..n]);
-        done += n as u64;
-        let pct = if total > 0 {
-            (done * 100 / total) as u32
-        } else {
-            0
-        };
-        if pct != last {
-            last = pct;
-            progress(pct);
-        }
+        file.flush().map_err(|e| e.to_string())?;
+        Ok(hex(&h.finalize()))
+    })();
+    drop(file); // close before removing on Windows, too
+    if result.is_err() {
+        let _ = std::fs::remove_file(dest);
     }
-    file.flush().map_err(|e| e.to_string())?;
-    Ok(hex(&h.finalize()))
+    result
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -329,6 +373,48 @@ pub fn pick_file<'a>(feed: &'a Feed, pkg: &Package) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "native-net")]
+    #[test]
+    fn capped_response_accepts_limit_and_rejects_one_more_byte() {
+        for cap in [FEED_MAX, SIGNATURE_MAX] {
+            let bytes = vec![b'x'; cap as usize];
+            assert_eq!(read_capped(bytes.as_slice(), cap).unwrap(), bytes);
+            let mut reader = std::io::repeat(b'x');
+            assert!(read_capped(&mut reader, cap).unwrap_err().contains("exceeds"));
+            let bytes = vec![b'x'; cap as usize + 1];
+            assert!(read_capped(bytes.as_slice(), cap).unwrap_err().contains("exceeds"));
+        }
+    }
+
+    #[cfg(feature = "native-net")]
+    #[test]
+    fn installer_limit_and_read_errors_remove_partial_file() {
+        let dir = private_dir(&std::env::temp_dir()).unwrap();
+        let dest = dir.join("installer.deb");
+        let bytes = vec![b'x'; 64 * 1024];
+        let cap = bytes.len() as u64;
+        let sha = download_body(bytes.as_slice(), &dest, 0, cap, |_| {}).unwrap();
+        assert_eq!(sha, hex(&Sha512::digest(&bytes)));
+        assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+        std::fs::remove_file(&dest).unwrap();
+        let oversized = bytes.as_slice().chain(&b"x"[..]);
+        assert!(download_body(oversized, &dest, 0, cap, |_| {}).unwrap_err().contains("exceeds"));
+        assert!(!dest.exists());
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("transfer failed"))
+            }
+        }
+        let broken = bytes.as_slice().chain(Broken);
+        assert!(download_body(broken, &dest, 0, cap, |_| {}).unwrap_err().contains("transfer failed"));
+        assert!(!dest.exists());
+        std::fs::write(&dest, b"existing").unwrap();
+        assert!(download_body(bytes.as_slice(), &dest, 0, cap, |_| {}).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"existing");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn deb_install_checks_its_own_copy() {

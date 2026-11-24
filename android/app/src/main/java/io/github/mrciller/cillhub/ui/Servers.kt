@@ -74,8 +74,8 @@ import io.github.mrciller.cillhub.data.Sel
 import io.github.mrciller.cillhub.data.Session
 import io.github.mrciller.cillhub.data.State
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
 /** Servers tab: a vertical server rail next to the selected server's channels; on large screens the chat beside them. */
@@ -439,9 +439,9 @@ private fun AddServerDialog(close: () -> Unit) {
                 TextButton(enabled = invite.isNotBlank() && !busy, onClick = {
                     val code = invite.trim().trimEnd('/').substringAfterLast('/')
                     run {
-                        val g = Session.rest.request("POST", "/invites/${java.net.URLEncoder.encode(code, "UTF-8")}")
-                        val sys = io.github.mrciller.cillhub.data.json.parseToJsonElement(g).jsonObject["system_channel_id"]
-                        Session.store.dispatch("GUILD_CREATE", io.github.mrciller.cillhub.data.json.parseToJsonElement(g).jsonObject)
+                        val g = Session.rest.call<JsonObject>("POST", "/invites/${java.net.URLEncoder.encode(code, "UTF-8")}")
+                        val sys = g["system_channel_id"]
+                        Session.store.dispatch("GUILD_CREATE", g)
                         (sys as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { nav.openChannel(it) }
                     }
                 }, shape = MaterialTheme.shapes.small) { Text(s(R.string.join_server).uppercase()) }
@@ -449,8 +449,8 @@ private fun AddServerDialog(close: () -> Unit) {
                 OutlinedTextField(name, { name = it }, label = { Text(s(R.string.new_server_name)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 TextButton(enabled = name.isNotBlank() && !busy, onClick = {
                     run {
-                        val g = Session.rest.request("POST", "/guilds", buildJsonObject { put("name", name.trim()) })
-                        Session.store.dispatch("GUILD_CREATE", io.github.mrciller.cillhub.data.json.parseToJsonElement(g).jsonObject)
+                        val g = Session.rest.call<JsonObject>("POST", "/guilds", buildJsonObject { put("name", name.trim()) })
+                        Session.store.dispatch("GUILD_CREATE", g)
                     }
                 }, shape = MaterialTheme.shapes.small) { Text(s(R.string.create_server).uppercase()) }
                 if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error)

@@ -5,14 +5,13 @@ import io.github.mrciller.cillhub.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.Request
@@ -29,20 +28,24 @@ class ApiError(val status: Int, val code: Int, message: String, val retryAfter: 
         /** The server's terms gate message (403 required_actions: accept_terms); "" once the user closed it. */
         val termsGate = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 
-        /** The first field message of a 50035 answer ("Username is unavailable."), else the message. */
+        /** The first field message of a 50035 answer ("Username is unavailable."), else the message. Any body shape is read
+         *  without throwing (only ApiError leaves here): a field of an unexpected type counts as absent. */
         fun parse(status: Int, text: String, retryHeader: String?): ApiError {
-            val body = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
-            val code = body?.get("code")?.jsonPrimitive?.intOrNull ?: 0
-            val msg = (if (code == 50035) firstFieldError(body?.get("errors")) else null) ?: body?.get("message")?.jsonPrimitive?.contentOrNull ?: "Request failed ($status)"
-            val retry = body?.get("retry_after")?.jsonPrimitive?.doubleOrNull ?: retryHeader?.toDoubleOrNull() ?: 0.0
-            val terms = body?.get("required_actions")?.let { a -> (a as? kotlinx.serialization.json.JsonArray)?.any { it.jsonPrimitive.contentOrNull == "accept_terms" } } == true
+            val body = runCatching { json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+            val code = body?.get("code").prim()?.intOrNull ?: 0
+            val msg = (if (code == 50035) firstFieldError(body?.get("errors")) else null) ?: body?.get("message").prim()?.contentOrNull ?: "Request failed ($status)"
+            val retry = body?.get("retry_after").prim()?.doubleOrNull ?: retryHeader?.toDoubleOrNull() ?: 0.0
+            val terms = (body?.get("required_actions") as? JsonArray)?.any { it.prim()?.contentOrNull == "accept_terms" } == true
             return ApiError(status, code, msg, retry, captcha = body?.containsKey("captcha_key") == true, acceptTerms = terms)
         }
 
-        private fun firstFieldError(e: JsonElement?): String? {
+        private fun JsonElement?.prim() = this as? JsonPrimitive
+
+        private fun firstFieldError(e: JsonElement?, depth: Int = 0): String? {
             val o = e as? JsonObject ?: return null
-            o["_errors"]?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull?.let { return it }
-            return o.values.firstNotNullOfOrNull { firstFieldError(it) }
+            if (depth > 16) return null
+            ((o["_errors"] as? JsonArray)?.firstOrNull() as? JsonObject)?.get("message").prim()?.contentOrNull?.let { return it }
+            return o.values.firstNotNullOfOrNull { firstFieldError(it, depth + 1) }
         }
     }
 }
@@ -55,6 +58,17 @@ class Upload(val name: String, val size: Long, val mime: String, val open: () ->
  * is waited out and retried (twice at most); message sends never retry silently, so slowmode reaches the user.
  */
 class Rest(private val base: () -> String, private val token: () -> String?) {
+    companion object {
+        /** Decodes a 2xx reply body; any syntax or shape failure becomes an [ApiError] without echoing the body. */
+        inline fun <reified T> decode(text: String): T = try {
+            json.decodeFromString(text)
+        } catch (e: IllegalArgumentException) {
+            // 502 (Bad Gateway): non-zero so Common.errorText surfaces this message instead of "can't reach server"
+            // and E2ee.decrypt does not retry a persistent shape mismatch as offline.
+            throw ApiError(502, 0, "Unexpected server response")
+        }
+    }
+
     private val JSON = "application/json".toMediaType()
 
     suspend fun request(method: String, path: String, body: JsonElement? = null, retry: Boolean = true): String =
@@ -63,11 +77,14 @@ class Rest(private val base: () -> String, private val token: () -> String?) {
             b.url(base() + path).method(method, rb)
         }
 
-    suspend inline fun <reified T> get(path: String): T = json.decodeFromString(request("GET", path))
-    suspend inline fun <reified T> call(method: String, path: String, body: JsonElement? = null): T = json.decodeFromString(request(method, path, body))
+    suspend inline fun <reified T> get(path: String): T = decode(request("GET", path))
+    suspend inline fun <reified T> call(method: String, path: String, body: JsonElement? = null, retry: Boolean = true): T = decode(request(method, path, body, retry))
 
     /** POST multipart with payload_json and files[n] (CONTRACT-v2 section 6), reporting upload progress 0..1. */
-    suspend fun multipart(path: String, payload: JsonObject, files: List<Upload>, progress: (Float) -> Unit = {}): String {
+    suspend inline fun <reified T> multipart(path: String, payload: JsonObject, files: List<Upload>, noinline progress: (Float) -> Unit = {}): T =
+        decode(sendMultipart(path, payload, files, progress))
+
+    @PublishedApi internal suspend fun sendMultipart(path: String, payload: JsonObject, files: List<Upload>, progress: (Float) -> Unit = {}): String {
         val total = files.sumOf { it.size }.coerceAtLeast(1)
         var sent = 0L
         val form = MultipartBody.Builder().setType(MultipartBody.FORM).addFormDataPart("payload_json", payload.toString())

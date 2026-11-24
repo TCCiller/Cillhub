@@ -52,6 +52,26 @@ class ModelsTest {
         assertFalse(e.captcha)
     }
 
+    // A server or proxy may answer an error with any JSON: reading it must give an ApiError (what every caller catches),
+    // never an IllegalArgumentException from a field of an unexpected type, which crashed the sign-in screen.
+    @Test fun apiErrorsOfAnyShapeNeverThrow() {
+        val bodies = listOf(
+            """{"code":{"x":1},"message":"m"}""", """{"message":["a"]}""", """{"retry_after":{"s":1}}""",
+            """{"required_actions":[{"a":1},["accept_terms"]]}""", """{"required_actions":"accept_terms"}""",
+            """{"code":50035,"errors":{"username":{"_errors":"taken"}}}""", """{"code":50035,"errors":{"a":{"_errors":[["x"]]}}}""",
+            """{"code":50035,"errors":{"a":{"_errors":[{"message":{"t":1}}]}}}""", """[1,2]""", """"text"""", "null",
+        )
+        for (b in bodies) {
+            val e = ApiError.parse(400, b, null)
+            assertEquals(b, 400, e.status)
+            assertFalse(b, e.acceptTerms)
+        }
+        assertEquals("m", ApiError.parse(400, """{"code":{"x":1},"message":"m"}""", null).message)
+        assertEquals("Request failed (502)", ApiError.parse(502, """{"message":["a"]}""", null).message)
+        assertEquals(3.0, ApiError.parse(429, """{"retry_after":{"s":1}}""", "3").retryAfter, 0.0)
+        assertEquals("Invalid", ApiError.parse(400, """{"code":50035,"message":"Invalid","errors":{"a":{"_errors":"taken"}}}""", null).message)
+    }
+
     @Test fun termsGateIsRecognised() {
         val g = ApiError.parse(403, """{"code":0,"message":"Accept the updated terms of use to continue.","required_actions":["accept_terms"]}""", null)
         assertEquals(true, g.acceptTerms)

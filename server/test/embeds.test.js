@@ -159,3 +159,22 @@ test('the meta parser stays linear on a hostile page (one long attribute name)',
   assert.ok(Date.now() - t < 500, `took ${Date.now() - t} ms`);
   assert.equal(metaTags('<meta property="og:title" content="ok">')['og:title'], 'ok');
 });
+
+test('rich embed timestamps refuse years outside 0000-9999 and accept 9999 as ISO', async () => {
+  const hook = (await api('POST', `/channels/${g.general.id}/webhooks`, alice.token, { name: 'ts-hook' })).body;
+  const send = body => api('POST', `/webhooks/${hook.id}/${hook.token}?wait=true`, null, body);
+  for (const bad of ['+010000-01-01T00:00:00Z', '-000001-01-01T00:00:00Z', 'not-a-date', 12345]) {
+    const r = await send({ embeds: [{ title: 'bad', timestamp: bad }] });
+    assert.equal(r.status, 400, String(bad));
+    assert.equal(r.body.errors?.['embeds.0.timestamp']?._errors?.[0]?.code, 'DATE_TYPE_PARSE', String(bad));
+  }
+  const max = '9999-12-31T23:59:59.000Z';
+  const ok = await send({ embeds: [{ title: 'ok', timestamp: max }] });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.embeds[0].timestamp, max);
+  const badEdit = await api('PATCH', `/webhooks/${hook.id}/${hook.token}/messages/${ok.body.id}`, null, {
+    embeds: [{ title: 'edit', timestamp: '+010000-01-01T00:00:00Z' }],
+  });
+  assert.equal(badEdit.status, 400);
+  assert.equal(badEdit.body.errors?.['embeds.0.timestamp']?._errors?.[0]?.code, 'DATE_TYPE_PARSE');
+});

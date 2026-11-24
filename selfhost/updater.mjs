@@ -183,15 +183,31 @@ async function load(file) {
 
 // ---- swapping the app container
 // data/ belongs to the app: never write through a link it may have planted (rm and rename act on the link itself)
-function restoreDb(snapshot) {
-  fs.rmSync(DB + '.restore', { force: true });
-  fs.copyFileSync(snapshot, DB + '.restore', fs.constants.COPYFILE_EXCL);
+export function restoreDb(snapshot) {
+  const tmp = DB + '.restore';
+  fs.rmSync(tmp, { force: true });
+  fs.copyFileSync(snapshot, tmp, fs.constants.COPYFILE_EXCL);
   const { uid, gid } = fs.statSync(path.dirname(DB));
-  fs.chownSync(DB + '.restore', uid, gid); // the app runs as the owner of data/, not as root
+  // the app runs as the owner of data/, not as root. That owner can swap the copy for a link (to .env, docker.sock)
+  // before the chown, so it goes through a descriptor of our own regular file (O_NONBLOCK: a planted FIFO cannot hang us)
+  const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+  const fd = fs.openSync(tmp, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1 || st.uid !== process.getuid()) throw new Error('data/cillcord.sqlite.restore was replaced while it was written; not restoring');
+    fs.fchownSync(fd, uid, gid);
+  } finally { fs.closeSync(fd); }
   for (const f of [DB + '-wal', DB + '-shm']) fs.rmSync(f, { force: true });
-  fs.renameSync(DB + '.restore', DB);
+  fs.renameSync(tmp, DB);
 }
 const isLink = (f) => fs.lstatSync(f, { throwIfNoEntry: false })?.isSymbolicLink();
+export function snapshotDb(snapshot) {
+  for (const f of [DB, `${DB}-wal`, `${DB}-shm`]) if (isLink(f)) throw new Error(`data/${path.basename(f)} is a symbolic link; refusing to open it`);
+  if (!fs.existsSync(DB)) return false;
+  const db = new DatabaseSync(DB);
+  try { db.prepare('VACUUM INTO ?').run(snapshot); } finally { db.close(); }
+  return true;
+}
 // The new container is the old one's config with the new image; values that came from the old image are dropped.
 function spec(old, oldImage, newImageId) {
   const img = oldImage.Config || {};
@@ -233,59 +249,93 @@ async function logTail(id) {
   return Buffer.concat(parts).toString().slice(-4000);
 }
 
+export function backupDir(root, label, now = new Date()) {
+  const safe = String(label ?? '')
+    .replace(/[^0-9A-Za-z._-]+/g, '-')
+    .replace(/\.{2,}/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 64) || 'unknown';
+  return path.join(root, 'backups', `${now.toISOString().replace(/[:.]/g, '-')}-${safe}`);
+}
+
+export async function executeSwap({ dir, snapshot, restoreFrom, ops }) {
+  let snapped = false, renamed = false, created = null;
+  try {
+    ops.step('stopping the app');
+    await ops.stopOld();
+    ops.step('database snapshot');
+    snapped = ops.snapshotDb(snapshot);
+    if (restoreFrom) { ops.step('restoring the database from before the update'); await ops.restoreDb(restoreFrom); }
+    ops.step(`starting ${ops.targetLabel}`);
+    await ops.tagNew();
+    await ops.renameOldToReplaced();
+    renamed = true;
+    created = await ops.createNew();
+    await ops.startNew(created.Id);
+    ops.step('health check');
+    await ops.healthCheck(created.Id);
+    await ops.removeOld();
+    return { backup: dir, snapshot: snapped ? snapshot : null };
+  } catch (err) {
+    ops.step(`reverting: ${err.message}`);
+    const failures = [];
+    if (created) {
+      err.logs = await Promise.resolve().then(() => ops.logTail(created.Id)).catch(() => null);
+      try { await ops.removeNew(created.Id); } catch (e) { failures.push(`remove new container (${e.message})`); }
+    }
+    if (snapped) {
+      try { await ops.restoreDb(snapshot); } catch (e) { failures.push(`database was not restored (${e.message})`); }
+    }
+    try { await ops.tagOld(); } catch (e) { failures.push(`tag previous image (${e.message})`); }
+    if (renamed) {
+      try { await ops.renameOldBack(); } catch (e) { failures.push(`rename container back (${e.message})`); }
+    }
+    try { await ops.startOld(); } catch (e) { failures.push(`start previous container (${e.message})`); }
+    try { await ops.healthCheck(ops.oldId); } catch (e) { failures.push(`the previous version did not come back either (${e.message})`); }
+    err.rolled_back = failures.length === 0;
+    if (failures.length) err.message += `; revert issues: ${failures.join('; ')}, backup in ${dir}`;
+    throw err;
+  }
+}
+
 // Backs up, switches the app to `target` (image id or ref), health-checks; reverts everything on failure.
 async function swap(target, label, restoreFrom) {
   const old = await appContainer();
   const name = old.Name.replace(/^\//, '');
   const oldImage = await docker('GET', `/images/${enc(old.Image)}/json`);
   const newImage = await docker('GET', `/images/${enc(target)}/json`);
-  const dir = path.join(ROOT, 'backups', `${new Date().toISOString().replace(/[:.]/g, '-')}-${label}`);
+  const dir = backupDir(ROOT, label);
   fs.mkdirSync(dir, { recursive: true });
   step('backing up files');
   // Files while the app still runs (can take a while); the database below with the app stopped.
   // the media proxy cache and half-finished uploads/exports come back by themselves
   execFileSync('tar', ['-czf', path.join(dir, 'data.tar.gz'), '-C', ROOT, '--exclude=data/cillcord.sqlite*',
     '--exclude=data/external', '--exclude=data/uploads-tmp', '--exclude=data/exports-tmp', 'data']);
-  step('stopping the app');
-  await docker('POST', `/containers/${old.Id}/stop?t=30`);
   const snapshot = path.join(dir, 'cillcord.sqlite');
-  let snapped = false, renamed = false, created = null;
-  try {
-    step('database snapshot');
-    for (const f of [DB, `${DB}-wal`, `${DB}-shm`]) if (isLink(f)) throw new Error(`data/${path.basename(f)} is a symbolic link; refusing to open it`);
-    if (fs.existsSync(DB)) {
-      const db = new DatabaseSync(DB);
-      try { db.exec(`VACUUM INTO '${snapshot}'`); } finally { db.close(); }
-      snapped = true;
-    }
-    if (restoreFrom) { step('restoring the database from before the update'); restoreDb(restoreFrom); }
-    step(`starting ${versionOf(newImage) || target}`);
-    await tag(newImage.Id, 'current');
-    await docker('POST', `/containers/${old.Id}/rename?name=${enc(name + '-replaced')}`);
-    renamed = true;
-    created = await docker('POST', `/containers/create?name=${enc(name)}`, spec(old, oldImage, newImage.Id));
-    await docker('POST', `/containers/${created.Id}/start`);
-    step('health check');
-    await healthy(created.Id);
-    await docker('DELETE', `/containers/${old.Id}?force=1`);
-    return { backup: dir, snapshot: snapped ? snapshot : null, previous: { image: oldImage.Id, version: versionOf(oldImage) } };
-  } catch (err) {
-    step(`reverting: ${err.message}`);
-    err.rolled_back = true;
-    if (created) {
-      err.logs = await logTail(created.Id).catch(() => null);
-      await docker('DELETE', `/containers/${created.Id}?force=1`).catch(() => {});
-    }
-    if (snapped) restoreDb(snapshot);
-    await tag(oldImage.Id, 'current');
-    if (renamed) await docker('POST', `/containers/${old.Id}/rename?name=${enc(name)}`);
-    await docker('POST', `/containers/${old.Id}/start`);
-    try { await healthy(old.Id); } catch (e) {
-      err.rolled_back = false;
-      err.message += `; the previous version did not come back either (${e.message}), backup in ${dir}`;
-    }
-    throw err;
-  }
+  const res = await executeSwap({
+    dir, snapshot, restoreFrom,
+    ops: {
+      step,
+      oldId: old.Id,
+      targetLabel: versionOf(newImage) || target,
+      stopOld: () => docker('POST', `/containers/${old.Id}/stop?t=30`),
+      snapshotDb,
+      restoreDb,
+      tagNew: () => tag(newImage.Id, 'current'),
+      tagOld: () => tag(oldImage.Id, 'current'),
+      renameOldToReplaced: () => docker('POST', `/containers/${old.Id}/rename?name=${enc(name + '-replaced')}`),
+      renameOldBack: () => docker('POST', `/containers/${old.Id}/rename?name=${enc(name)}`),
+      createNew: () => docker('POST', `/containers/create?name=${enc(name)}`, spec(old, oldImage, newImage.Id)),
+      startNew: (id) => docker('POST', `/containers/${id}/start`),
+      startOld: () => docker('POST', `/containers/${old.Id}/start`),
+      healthCheck: healthy,
+      logTail,
+      removeNew: (id) => docker('DELETE', `/containers/${id}?force=1`),
+      removeOld: () => docker('DELETE', `/containers/${old.Id}?force=1`),
+    },
+  });
+  return { ...res, previous: { image: oldImage.Id, version: versionOf(oldImage) } };
 }
 
 // keeps the newest `keep` backups/<timestamp>-<label> folders, and always the one holding `protect` (the rollback snapshot)
@@ -325,7 +375,7 @@ async function update(j) {
 }
 async function rollback() {
   const from = await currentVersion().catch(() => null);
-  const r = await swap(state.previous.image, `pre-rollback-to-${state.previous.version}`, state.rollback_snapshot);
+  const r = await swap(state.previous.image, `pre-rollback-to-${state.previous.version ?? 'unknown'}`, state.rollback_snapshot);
   save({ previous: null, rollback_snapshot: null, backup: r.backup, skip_version: from }); // rolled back by hand: no automatic retry
 }
 

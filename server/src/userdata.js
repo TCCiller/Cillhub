@@ -1,6 +1,6 @@
 // The user settings document, user guild settings and notes: storage, defaults and validation
 import { get, all, run, json } from './db.js';
-import { invalid } from './errors.js';
+import { invalid, isoTime } from './errors.js';
 
 const SNOWFLAKE = /^\d{1,19}$/;
 const fail = (field, message) => { throw invalid(field, 'BASE_TYPE_BAD_VALUE', message); };
@@ -8,7 +8,7 @@ const oneOf = (...vals) => (v, f) => (vals.includes(v) ? v : fail(f, `Must be on
 const boolean = (v, f) => (typeof v === 'boolean' ? v : fail(f, 'Must be a boolean.'));
 const intIn = (min, max) => (v, f) => (Number.isInteger(v) && v >= min && v <= max ? v : fail(f, `Must be an integer between ${min} and ${max}.`));
 const strOrNull = max => (v, f) => (v === null || (typeof v === 'string' && v.length <= max) ? v || null : fail(f, `Must be a string of at most ${max} characters or null.`));
-const isoOrNull = (v, f) => (v === null ? null : typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? new Date(v).toISOString() : fail(f, 'Must be an ISO8601 timestamp or null.'));
+const isoOrNull = (v, f) => (v === null ? null : isoTime(v) ?? fail(f, 'Must be an ISO8601 timestamp or null.'));
 // server lists in the rail (folders, order) also hold node servers, as the client names them: <node id>~<snowflake>
 const GUILD_REF = /^\d{1,19}(~\d{1,20})?$/;
 const guildList = max => (v, f) => (Array.isArray(v) && v.length <= max && v.every(x => typeof x === 'string' && GUILD_REF.test(x)) ? [...new Set(v)] : fail(f, 'Must be a list of server ids.'));

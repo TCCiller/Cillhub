@@ -27,11 +27,18 @@ pub mod websocket;
 #[cfg(feature = "native-net")]
 pub mod websocket_transport;
 
+/// Embedded in the compiled binary so `desktop-rust/scripts/publish.js` can verify both Linux and
+/// Windows builds carry the version being published without executing them.
+#[used]
+pub static BUILD_VERSION_MARKER: &[u8] =
+    concat!("CILLHUB_NATIVE_VERSION=", env!("CARGO_PKG_VERSION"), "\0").as_bytes();
+
 #[cfg(feature = "native-gui")]
 pub fn run_desktop_app() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--version" || a == "-v") {
+        let _ = std::hint::black_box(BUILD_VERSION_MARKER);
         println!(
             "cillhub-desktop {} (Pure Rust Native egui/eframe)",
             env!("CARGO_PKG_VERSION")

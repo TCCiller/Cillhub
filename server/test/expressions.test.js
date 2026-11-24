@@ -147,3 +147,58 @@ test('scheduled events: create, interested users with events, status transitions
   assert.equal((await api('DELETE', `/guilds/${g.guild.id}/scheduled-events/${ext.body.id}`, alice.token)).status, 204);
   assert.equal((await bob.gw.event('GUILD_SCHEDULED_EVENT_DELETE')).id, ext.body.id);
 });
+
+// packs had no creator: anyone with CREATE_GUILD_EXPRESSIONS could rewrite or delete every pack, and nothing bounded them
+test('soundboard packs: CREATE_GUILD_EXPRESSIONS edits its own only; sound_ids and the pack count are bounded', async () => {
+  const packs = `/guilds/${g.guild.id}/soundboard-packs`;
+  const pack = (who, body) => api('POST', packs, who.token, body);
+  const alices = (await pack(alice, { name: 'Owner pack', sound_ids: ['1', '2'] })).body;
+  // carol holds the maker role from the emoji test (CREATE_GUILD_EXPRESSIONS only)
+  assert.equal((await api('PUT', `${packs}/${alices.id}`, carol.token, { name: 'taken over' })).status, 403);
+  assert.equal((await api('DELETE', `${packs}/${alices.id}`, carol.token)).status, 403);
+  assert.equal((await api('PUT', `${packs}/${alices.id}`, bob.token, { name: 'x' })).status, 403, 'no expression permission');
+  const own = (await pack(carol, { name: 'Carol pack', sound_ids: ['5', '5', 6] })).body;
+  assert.deepEqual(own.sound_ids, ['5', '6'], 'repeats dropped, ids as strings');
+  assert.equal((await api('PUT', `${packs}/${own.id}`, carol.token, { name: 'Carol 2' })).body.name, 'Carol 2');
+  assert.equal((await api('PUT', `${packs}/${own.id}`, alice.token, { name: 'Moderated' })).body.name, 'Moderated', 'MANAGE_GUILD_EXPRESSIONS edits any');
+  assert.equal((await api('DELETE', `${packs}/${own.id}`, carol.token)).status, 204);
+  for (const sound_ids of [Array.from({ length: 49 }, (_, i) => String(i + 1)), ['x'], [{ a: 1 }], 'abc']) {
+    assert.equal((await pack(alice, { name: 'bad', sound_ids })).status, 400, JSON.stringify(sound_ids).slice(0, 40));
+    assert.equal((await api('PUT', `${packs}/${alices.id}`, alice.token, { sound_ids })).status, 400);
+  }
+  const have = (await api('GET', packs, alice.token)).body.length;
+  for (let i = have; i < 50; i++) assert.equal((await pack(alice, { name: `p${i}` })).status, 201);
+  const over = await pack(alice, { name: 'one too many' });
+  assert.deepEqual([over.status, over.body.code], [400, 30045]);
+  assert.equal((await api('GET', packs, alice.token)).body.length, 50);
+});
+
+test('soundboard pack update refuses non-string description/icon_emoji, clears on null, and cuts strings to limits', async () => {
+  const packs = `/guilds/${g.guild.id}/soundboard-packs`;
+  const [target] = (await api('GET', packs, alice.token)).body;
+  const put = body => api('PUT', `${packs}/${target.id}`, alice.token, body);
+  const read = async () => (await api('GET', packs, alice.token)).body.find(p => p.id === target.id);
+
+  const init = await put({ description: 'a'.repeat(250), icon_emoji: 'x'.repeat(50) });
+  assert.equal(init.status, 200);
+  assert.equal(init.body.description, 'a'.repeat(200));
+  assert.equal(init.body.icon_emoji, 'x'.repeat(32));
+
+  for (const bad of [42, { a: 1 }, ['x'], true, false]) {
+    assert.equal((await put({ description: bad })).status, 400, `description=${JSON.stringify(bad)}`);
+    assert.equal((await put({ icon_emoji: bad })).status, 400, `icon_emoji=${JSON.stringify(bad)}`);
+  }
+  const unchanged = await read();
+  assert.equal(unchanged.description, 'a'.repeat(200));
+  assert.equal(unchanged.icon_emoji, 'x'.repeat(32));
+
+  const cleared = await put({ description: null, icon_emoji: null });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.description, '');
+  assert.equal(cleared.body.icon_emoji, null);
+
+  const setAgain = await put({ description: 'keep', icon_emoji: '🔔' });
+  assert.deepEqual([setAgain.status, setAgain.body.description, setAgain.body.icon_emoji], [200, 'keep', '🔔']);
+  const emptyIcon = await put({ icon_emoji: '' });
+  assert.deepEqual([emptyIcon.status, emptyIcon.body.icon_emoji], [200, null]);
+});

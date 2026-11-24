@@ -116,17 +116,42 @@ function listPacks(ctx) {
   return all('SELECT * FROM soundboard_packs WHERE guild_id = ? ORDER BY rowid', g.id).map(packObj);
 }
 
+const MAX_PACKS = 50;
+// a pack lists sounds by id: at most as many as a guild can hold, each a snowflake, no repeats
+function packSounds(v) {
+  if (!Array.isArray(v) || v.length > 48 || !v.every(x => /^\d{1,19}$/.test(String(x)))) {
+    throw invalid('sound_ids', 'BASE_TYPE_BAD_VALUE', 'Must be a list of at most 48 sound ids.');
+  }
+  return [...new Set(v.map(String))];
+}
+
+function loadPack(g, id) {
+  const p = get('SELECT * FROM soundboard_packs WHERE id = ? AND guild_id = ?', id, g.id);
+  if (!p) throw notFound(10097, 'Soundboard Pack');
+  return p;
+}
+
+function packText(body, field, max, empty) {
+  const v = body[field];
+  if (v === null) return empty;
+  if (typeof v !== 'string') throw invalid(field, 'BASE_TYPE_REQUIRED', 'Must be a string.');
+  return v.slice(0, max) || empty;
+}
+
 function createPack(ctx) {
   const g = loadGuild(ctx.params.id, ctx.user);
   needCreate(g.perms);
   const name = str(ctx.body ?? {}, 'name', 1, 64);
   const description = typeof ctx.body?.description === 'string' ? ctx.body.description.slice(0, 200) : '';
   const iconEmoji = typeof ctx.body?.icon_emoji === 'string' ? ctx.body.icon_emoji.slice(0, 32) : null;
-  const soundIds = Array.isArray(ctx.body?.sound_ids) ? ctx.body.sound_ids.map(String) : [];
+  const soundIds = ctx.body?.sound_ids === undefined ? [] : packSounds(ctx.body.sound_ids);
+  if (get('SELECT COUNT(*) AS n FROM soundboard_packs WHERE guild_id = ?', g.id).n >= MAX_PACKS) {
+    throw new HttpError(400, 30045, `Maximum number of soundboard packs reached (${MAX_PACKS})`);
+  }
   const id = snowflake();
   const now = new Date().toISOString();
-  run('INSERT INTO soundboard_packs (id, guild_id, name, description, icon_emoji, sound_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    id, g.id, name, description, iconEmoji, JSON.stringify(soundIds), now);
+  run('INSERT INTO soundboard_packs (id, guild_id, name, description, icon_emoji, sound_ids, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    id, g.id, name, description, iconEmoji, JSON.stringify(soundIds), now, ctx.user.id);
   const p = get('SELECT * FROM soundboard_packs WHERE id = ?', id);
   announce(g, 'GUILD_SOUNDBOARD_PACK_CREATE', packObj(p));
   ctx.status = 201;
@@ -135,14 +160,13 @@ function createPack(ctx) {
 
 function updatePack(ctx) {
   const g = loadGuild(ctx.params.id, ctx.user);
-  needCreate(g.perms);
-  const p = get('SELECT * FROM soundboard_packs WHERE id = ? AND guild_id = ?', ctx.params.pack_id, g.id);
-  if (!p) throw notFound(10097, 'Soundboard Pack');
+  const p = loadPack(g, ctx.params.pack_id);
+  needEdit(g.perms, p.user_id, ctx.user.id);
   const b = ctx.body ?? {};
   const name = b.name !== undefined ? str(b, 'name', 1, 64) : p.name;
-  const description = b.description !== undefined ? String(b.description).slice(0, 200) : p.description;
-  const iconEmoji = b.icon_emoji !== undefined ? (b.icon_emoji ? String(b.icon_emoji).slice(0, 32) : null) : p.icon_emoji;
-  const soundIds = Array.isArray(b.sound_ids) ? b.sound_ids.map(String) : JSON.parse(p.sound_ids);
+  const description = b.description !== undefined ? packText(b, 'description', 200, '') : p.description;
+  const iconEmoji = b.icon_emoji !== undefined ? packText(b, 'icon_emoji', 32, null) : p.icon_emoji;
+  const soundIds = b.sound_ids !== undefined ? packSounds(b.sound_ids) : JSON.parse(p.sound_ids);
   run('UPDATE soundboard_packs SET name = ?, description = ?, icon_emoji = ?, sound_ids = ? WHERE id = ?',
     name, description, iconEmoji, JSON.stringify(soundIds), p.id);
   const out = get('SELECT * FROM soundboard_packs WHERE id = ?', p.id);
@@ -152,9 +176,8 @@ function updatePack(ctx) {
 
 function removePack(ctx) {
   const g = loadGuild(ctx.params.id, ctx.user);
-  needCreate(g.perms);
-  const p = get('SELECT * FROM soundboard_packs WHERE id = ? AND guild_id = ?', ctx.params.pack_id, g.id);
-  if (!p) throw notFound(10097, 'Soundboard Pack');
+  const p = loadPack(g, ctx.params.pack_id);
+  needEdit(g.perms, p.user_id, ctx.user.id);
   run('DELETE FROM soundboard_packs WHERE id = ?', p.id);
   announce(g, 'GUILD_SOUNDBOARD_PACK_DELETE', { id: p.id, guild_id: g.id });
 }

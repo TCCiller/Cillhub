@@ -8,7 +8,7 @@
   "scripts": {
     "test": "cargo test",
     "build": "cargo build --release",
-    "build:windows": "cargo xwin build --release --target x86_64-pc-windows-msvc && makensis -DVERSION=3.0.2 installer.nsi",
+    "build:windows": "cargo xwin build --release --target x86_64-pc-windows-msvc && makensis -DVERSION=$npm_package_version installer.nsi",
     "publish": "node scripts/publish.js"
   },
   "cillhubServer": "7.10.0"

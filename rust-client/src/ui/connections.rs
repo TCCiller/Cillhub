@@ -372,7 +372,7 @@ impl CillhubApp {
 
     /// Records a sign-out to confirm (saved; if saving fails, kept in memory and saved again with the next retry)
     /// and tries it now. False when it could not be saved yet.
-    fn sign_out_later(&mut self, origin: &str, token: String) -> bool {
+    pub(super) fn sign_out_later(&mut self, origin: &str, token: String) -> bool {
         match self.settings.add_pending_revoke(origin, &token) {
             Ok(key) => {
                 self.revoke_async(key, origin.to_string(), token);

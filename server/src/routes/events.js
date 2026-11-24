@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { snowflake } from '../snowflake.js';
 import { get, all, run, json, memberIds, memberRow, memberObj, userById, userObj } from '../db.js';
-import { HttpError, str, int, invalid, intParam, idParam, snowflakeField, notFound, missingPermissions } from '../errors.js';
+import { HttpError, str, int, invalid, isoTime, intParam, idParam, snowflakeField, notFound, missingPermissions } from '../errors.js';
 import { P, has, channelPerms, viewersOf } from '../permissions.js';
 import { sendToUsers, guildParts } from '../gateway.js';
 import { saveImage, removeImage } from '../files.js';
@@ -49,9 +49,9 @@ export function setEventStatus(id, from, to) {
 }
 
 function time(body, field) {
-  const t = Date.parse(body[field]);
-  if (typeof body[field] !== 'string' || Number.isNaN(t)) throw invalid(field, 'DATE_TYPE_PARSE', 'Must be an ISO8601 timestamp.');
-  return new Date(t).toISOString();
+  const t = isoTime(body[field]);
+  if (!t) throw invalid(field, 'DATE_TYPE_PARSE', 'Must be an ISO8601 timestamp.');
+  return t;
 }
 
 // the validated row fields of a create or PATCH body, merged over the current event

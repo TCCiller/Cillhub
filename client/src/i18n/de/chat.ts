@@ -327,7 +327,7 @@ export const chat: Record<string, string> = {
   "Threads": "Threads",
   "Tip: hold Shift when clicking delete to skip this.": "Tipp: Halte beim Klicken auf Löschen die Umschalttaste gedrückt, um das zu überspringen.",
   "Today at {time}": "Heute um {time}",
-  "Too large (max 25 MB)": "Zu groß (max. 25 MB)",
+  "Too large (max {n} MB)": "Zu groß (max. {n} MB)",
   "Type your answer": "Gib deine Antwort ein",
   "Unarchive Thread": "Archivierung aufheben",
   "Unblock": "Blockierung aufheben",

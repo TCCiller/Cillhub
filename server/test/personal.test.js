@@ -68,6 +68,32 @@ test('blocking: removes friendship, stops DMs and friend requests both ways', as
   await friends(alice, bob);
 });
 
+for (const relationship of ['blocked', 'unfriended']) {
+  test(`DM conversion cannot add a partner who has ${relationship} the caller`, async () => {
+    const dm = (await api('POST', '/users/@me/channels', alice.token, { recipient_id: bob.id })).body;
+    assert.equal(dm.type, 1);
+    const groups = async () => {
+      const response = await api('GET', '/users/@me/channels', bob.token);
+      assert.equal(response.status, 200);
+      return response.body.filter(ch => ch.type === 3).map(ch => ch.id).sort();
+    };
+    const before = await groups();
+    try {
+      if (relationship === 'blocked') {
+        assert.equal((await api('PUT', `/users/@me/relationships/${alice.id}`, bob.token, { type: 2 })).status, 204);
+      } else {
+        assert.equal((await api('DELETE', `/users/@me/relationships/${alice.id}`, bob.token)).status, 204);
+      }
+      const added = await api('PUT', `/channels/${dm.id}/recipients/${carol.id}`, alice.token);
+      assert.equal(added.status, 403);
+      assert.deepEqual(await groups(), before, 'the partner has no new group DM');
+    } finally {
+      if (relationship === 'blocked') await api('DELETE', `/users/@me/relationships/${alice.id}`, bob.token);
+      await friends(alice, bob);
+    }
+  });
+}
+
 test('profiles: bio, pronouns, accent, banner, mutual guilds, per-guild profile; notes stay private', async () => {
   const banner = `data:image/png;base64,${png(600, 240).toString('base64')}`;
   const me = (await api('PATCH', '/users/@me', carol.token, { bio: 'x'.repeat(190), pronouns: 'she/her', accent_color: 0xff0000, banner })).body;
@@ -162,4 +188,21 @@ test('bulk ack clamps future IDs and preserves read position and mentions on sta
   again.ws.close();
   assert.equal(state.last_message_id, first.id);
   assert.equal(state.mention_count, 1);
+});
+
+// stored timestamps are compared as strings: "+010000-…" (past year 9999) sorted before every real date, so one user's
+// far-future custom status became the "next" expiry and held back every other user's expiry until the hourly sweep
+test('timestamps past year 9999 or before year 0 are refused, year 9999 still works', async () => {
+  const guild = `/users/@me/guilds/${g.guild.id}/settings`;
+  const event = t => ({ name: 'far', entity_type: 3, entity_metadata: { location: 'x' }, privacy_level: 2, scheduled_start_time: t, scheduled_end_time: t });
+  for (const t of ['+010000-01-01T00:00:00.000Z', '-000001-01-01T00:00:00.000Z']) {
+    assert.equal((await api('PATCH', '/users/@me/settings', carol.token, { custom_status: { text: 'x', expires_at: t } })).status, 400, t);
+    assert.equal((await api('PATCH', guild, carol.token, { muted: true, mute_config: { end_time: t } })).status, 400, t);
+    assert.equal((await api('POST', `/guilds/${g.guild.id}/scheduled-events`, alice.token, event(t))).status, 400, t);
+  }
+  const max = '9999-12-31T23:59:59.000Z';
+  const s = await api('PATCH', '/users/@me/settings', carol.token, { custom_status: { text: 'x', expires_at: max } });
+  assert.equal(s.body.custom_status.expires_at, max);
+  assert.equal((await api('PATCH', guild, carol.token, { muted: true, mute_config: { end_time: max } })).body.mute_config.end_time, max);
+  await api('PATCH', '/users/@me/settings', carol.token, { custom_status: null });
 });

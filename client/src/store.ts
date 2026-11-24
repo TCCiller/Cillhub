@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { instanceEvent } from './admin/instance'
 import { nodeOf } from './instances/registry'
+import { withMembers } from './members'
 import { moduleUiEvent } from './modules/events'
 import type { Anchor } from './components/menu'
 import type { Activity, Call, Channel, ChannelCanvas, Component, Guild, GuildPayload, Member, Message, Poll, Presence, ReadState, Relationship, SavedMessage, ScheduledEvent, Sound, StageInstance, Status, User, UserGuildSettings, UserSettings, VoiceState, WatchSession } from './types'
@@ -298,7 +299,6 @@ function patchList(s: State, channelId: string, fn: (l: Message[]) => Message[])
 const patchMessage = (s: State, channelId: string, id: string, fn: (m: Message) => Message) =>
   patchList(s, channelId, (l) => l.map((m) => (m.id === id ? fn(m) : m)))
 
-const withMembers = (s: State, guildId: string, list: Member[]) => ({ ...s.members, [guildId]: { ...s.members[guildId], ...Object.fromEntries(list.map((m) => [m.user.id, m])) } })
 const voiceByUser = (list: VoiceState[] = []) => Object.fromEntries(list.filter((v) => v.channel_id).map((v) => [v.user_id, v]))
 
 function addGuild(s: State, { channels = [], members, presences, voice_states, threads = [], stage_instances, guild_scheduled_events, soundboard_sounds, watch_sessions, ...guild }: GuildPayload): Partial<State> {
@@ -309,7 +309,7 @@ function addGuild(s: State, { channels = [], members, presences, voice_states, t
     stageInstances: stage_instances ? { ...Object.fromEntries(Object.entries(s.stageInstances).filter(([, i]) => i.guild_id !== guild.id)), ...Object.fromEntries(stage_instances.map((i) => [i.channel_id, i])) } : s.stageInstances,
     events: guild_scheduled_events ? { ...Object.fromEntries(Object.entries(s.events).filter(([, e]) => e.guild_id !== guild.id)), ...byId(guild_scheduled_events) } : s.events,
     sounds: soundboard_sounds ? { ...s.sounds, [guild.id]: soundboard_sounds } : s.sounds,
-    members: withMembers(s, guild.id, extra),
+    members: withMembers(s.members, guild.id, extra),
     membersLoaded: members && members.length >= guild.member_count ? { ...s.membersLoaded, [guild.id]: true } : s.membersLoaded,
     // Joining while connected: READY never had these members' presences.
     presences: presences ? { ...s.presences, ...byUser(presences) } : s.presences,
@@ -428,7 +428,7 @@ function setVoiceState(s: State, v: VoiceState): Partial<State> {
   const g = s.voiceStates[key] ?? {}
   return {
     voiceStates: { ...s.voiceStates, [key]: v.channel_id ? { ...g, [v.user_id]: v } : omit(g, v.user_id) },
-    ...(v.member && v.guild_id && { members: withMembers(s, v.guild_id, [v.member]), users: { ...s.users, [v.user_id]: v.member.user } }),
+    ...(v.member && v.guild_id && { members: withMembers(s.members, v.guild_id, [v.member]), users: { ...s.users, [v.user_id]: v.member.user } }),
   }
 }
 export const savedKey = (d: { channel_id: string; message_id: string }) => `${d.channel_id}-${d.message_id}`
@@ -628,7 +628,7 @@ export function apply(t: string, d: any) {
     case 'GUILD_MEMBER_UPDATE': {
       const { guild_id, ...m } = d as Member & { guild_id: string }
       const old = s.members[guild_id]?.[m.user.id]
-      return setState({ users: { ...s.users, [m.user.id]: m.user }, members: withMembers(s, guild_id, [{ ...old, ...m }]) })
+      return setState({ users: { ...s.users, [m.user.id]: m.user }, members: withMembers(s.members, guild_id, [{ ...old, ...m }]) })
     }
     case 'GUILD_MEMBER_REMOVE': {
       if (d.user.id === s.me?.id) return setState(removeGuild(s, d.guild_id))

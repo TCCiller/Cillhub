@@ -18,9 +18,16 @@ class GatewayProtocol(
 ) {
     enum class Action { NONE, START_HEARTBEAT, RECONNECT, STOP }
 
+    companion object {
+        const val DEFAULT_HEARTBEAT_MS = 41_250L
+        const val MIN_HEARTBEAT_MS = 1_000L
+        // Upper bound keeps zombie detection (unacked heartbeat -> reconnect) active and avoids schedule delay overflow.
+        const val MAX_HEARTBEAT_MS = 300_000L
+    }
+
     var sessionId: String? = null; private set
     var seq: Long? = null; private set
-    var heartbeatMs: Long = 41250; private set
+    var heartbeatMs: Long = DEFAULT_HEARTBEAT_MS; private set
     private var acked = true
 
     /** Called for each text frame. */
@@ -29,7 +36,8 @@ class GatewayProtocol(
         if (!f.isNull("s")) seq = f.optLong("s")
         return when (f.optInt("op", -1)) {
             10 -> {
-                heartbeatMs = f.optJSONObject("d")?.optLong("heartbeat_interval", 41250) ?: 41250
+                val raw = f.optJSONObject("d")?.optLong("heartbeat_interval", 0L) ?: 0L
+                heartbeatMs = if (raw <= 0L) DEFAULT_HEARTBEAT_MS else raw.coerceIn(MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS)
                 acked = true
                 val t = token() ?: return Action.STOP
                 val sid = sessionId

@@ -55,7 +55,11 @@ function addRecipient({ params, user }) {
   const ch = loadPrivate(params.id, user);
   if (isRecipient(ch.id, params.user_id)) return ch.type === 3 ? undefined : channelObj(ch, user.id);
   checkAddable(user, params.user_id);
-  if (ch.type === 1) return insertGroup(user, [...channelUserIds(ch).filter(id => id !== user.id), params.user_id], ch.id);
+  if (ch.type === 1) {
+    const partners = channelUserIds(ch).filter(id => id !== user.id);
+    partners.forEach(id => checkAddable(user, id));
+    return insertGroup(user, [...partners, params.user_id], ch.id);
+  }
   if (channelUserIds(ch).length >= MAX_RECIPIENTS) throw new HttpError(400, 30014, 'Maximum number of recipients reached (10)');
   run('INSERT INTO dm_recipients (channel_id, user_id) VALUES (?, ?)', ch.id, params.user_id);
   sendToUsers([params.user_id], 'CHANNEL_CREATE', channelObj(ch, params.user_id));

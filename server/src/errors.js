@@ -29,6 +29,14 @@ export function emailField(body, field = 'email') {
   return v;
 }
 
+// a parsed timestamp as ISO 8601, or null. Stored timestamps are compared as strings (SQL and JS), so only years
+// 0000-9999 are accepted: beyond them toISOString gives "+010000-..." or "-000001-...", which sort before every real date
+export function isoTime(v) {
+  const t = typeof v === 'string' ? Date.parse(v) : NaN;
+  const iso = Number.isNaN(t) ? null : new Date(t).toISOString();
+  return iso && /^\d{4}-/.test(iso) ? iso : null;
+}
+
 export function intParam(query, name, fallback, min, max) {
   if (!query.has(name)) return fallback;
   const n = Number(query.get(name));

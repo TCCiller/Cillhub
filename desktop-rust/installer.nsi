@@ -53,8 +53,8 @@ Section "Install" SecInstall
 
   ; Terminate any running old Tauri/Electron or Rust Cillhub instance so files are unlocked.
   ; No /T: the app starts this installer for an update, and a tree kill would end the installer too.
-  nsExec::ExecToLog 'taskkill /F /IM Cillhub.exe'
-  nsExec::ExecToLog 'taskkill /F /IM cillhub.exe'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM Cillhub.exe'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM cillhub.exe'
   Sleep 500
 
   SetOutPath "$INSTDIR"
@@ -138,8 +138,8 @@ SectionEnd
 Section "Uninstall"
   SetShellVarContext current
 
-  nsExec::ExecToLog 'taskkill /F /IM Cillhub.exe /T'
-  nsExec::ExecToLog 'taskkill /F /IM cillhub.exe /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM Cillhub.exe /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM cillhub.exe /T'
 
   Delete "$DESKTOP\Cillhub.lnk"
   Delete "$SMPROGRAMS\Cillhub.lnk"

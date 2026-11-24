@@ -171,12 +171,24 @@ impl AppSettings {
     }
 
     /// Reads the file; a plaintext token from an older version moves to the keyring, or the
-    /// file is at least rewritten with tight permissions.
+    /// file is at least rewritten with tight permissions. A file that exists but cannot be read or parsed is moved
+    /// to `settings.json.unreadable` first: the defaults are saved over the path later, and the old file still holds
+    /// node tokens and the sign-out journal.
     pub fn load_from(path: &Path) -> Self {
-        let mut s: Self = fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let parsed = match fs::read_to_string(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            read => read.map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())),
+        };
+        let mut s: Self = parsed.unwrap_or_else(|e| {
+            let aside = path.with_extension("json.unreadable");
+            // shortcut: if the file cannot be moved either (locked), the next save still replaces it; a retry loop
+            // would be the upgrade if that is ever seen
+            match fs::rename(path, &aside) {
+                Ok(()) => eprintln!("cillhub: settings unreadable ({e}); kept as {}", aside.display()),
+                Err(m) => eprintln!("cillhub: settings unreadable ({e}) and could not be set aside: {m}"),
+            }
+            Self::default()
+        });
         s.private_nodes = crate::nodes::sanitize(std::mem::take(&mut s.private_nodes));
         if let Some(token) = s.saved_token.clone() {
             if keyring_entry(SESSION).is_some_and(|k| k.set_password(&token).is_ok()) {

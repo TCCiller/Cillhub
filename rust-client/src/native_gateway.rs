@@ -104,7 +104,8 @@ fn spawn_inner(
         // one outbox for every attempt: commands held for READY survive a reconnect
         let mut outbox = Outbox::default();
         loop {
-            match run_once(
+            let mut reached_ready = false;
+            let outcome = run_once(
                 &client,
                 &origin,
                 &token,
@@ -113,36 +114,48 @@ fn spawn_inner(
                 &mut last_presence,
                 &mut outbox,
                 node.as_ref(),
-            ) {
+                &mut reached_ready,
+            );
+            match outcome {
                 Ok(true) => break, // clean shutdown
-                Ok(false) => backoff = 1,
+                Ok(false) => {}    // the server asked for a reconnect (op 9): waits too, see retry_after
                 Err(error) => {
-                    outbox.reconnect(); // commands from now on wait for the next READY
                     let _ = sender.send(GatewayEvent::ConnectionError(error.to_string()));
-                    let sleep_until = Instant::now() + Duration::from_secs(backoff);
-                    while Instant::now() < sleep_until {
-                        if let Ok(cmd) = commands.try_recv() {
-                            match cmd {
-                                GatewayCommand::Shutdown => return,
-                                GatewayCommand::UpdatePresence {
-                                    status,
-                                    custom_status,
-                                    game,
-                                } => {
-                                    last_presence = (status, custom_status, game);
-                                }
-                                other => {
-                                    outbox.command(other, &mut last_presence); // held for the next READY
-                                }
-                            }
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                    backoff = (backoff * 2).min(30);
                 }
+            }
+            outbox.reconnect(); // commands from now on wait for the next READY
+            let (wait, next) = retry_after(reached_ready, backoff);
+            backoff = next;
+            let sleep_until = Instant::now() + Duration::from_secs(wait);
+            while Instant::now() < sleep_until {
+                if let Ok(cmd) = commands.try_recv() {
+                    match cmd {
+                        GatewayCommand::Shutdown => return,
+                        GatewayCommand::UpdatePresence {
+                            status,
+                            custom_status,
+                            game,
+                        } => {
+                            last_presence = (status, custom_status, game);
+                        }
+                        other => {
+                            outbox.command(other, &mut last_presence); // held for the next READY
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(100));
             }
         }
     })
+}
+
+/// Seconds to wait before the next attempt, and the backoff after that. Every attempt waits: one that ended in a
+/// reconnect request (op 9) went straight back before, so a server answering each IDENTIFY with op 9 got a storm of
+/// /gateway calls and IDENTIFYs with no pause. An attempt that reached READY starts over at 1 s (a long healthy
+/// session that drops does not inherit an old 30 s wait); one that did not doubles it, up to 30 s.
+fn retry_after(reached_ready: bool, backoff: u64) -> (u64, u64) {
+    let wait = if reached_ready { 1 } else { backoff.clamp(1, 30) };
+    (wait, (wait * 2).min(30))
 }
 
 #[allow(clippy::too_many_arguments)] // one connection attempt; the loop state lives in spawn_inner
@@ -155,6 +168,7 @@ fn run_once(
     last_presence: &mut (String, Option<CustomStatus>, Option<GameActivity>),
     outbox: &mut Outbox,
     node: Option<&QueueBytes>,
+    reached_ready: &mut bool,
 ) -> io::Result<bool> {
     let pin = node.is_some();
     let endpoint = api_url(origin, "/gateway").ok_or_else(|| invalid("Invalid gateway API URL"))?;
@@ -210,6 +224,7 @@ fn run_once(
                         return Ok(false);
                     }
                     if ready {
+                        *reached_ready = true;
                         outbox.ready(last_presence, |env| {
                             socket.send(Opcode::Text, &serde_json::to_vec(env).map_err(io::Error::other)?)
                         })?;
@@ -411,6 +426,18 @@ mod tests {
         q.store(0, Ordering::SeqCst); // the UI took them
         assert_eq!(waiter.join().unwrap().unwrap(), Some(100));
         assert!(t.elapsed() >= Duration::from_millis(50), "it waited for room");
+    }
+
+    #[test]
+    fn every_attempt_waits_and_only_ready_resets_the_backoff() {
+        // a server that answers every IDENTIFY with op 9 (never READY): the waits grow instead of none at all
+        let mut backoff = 1;
+        let waits: Vec<u64> = (0..7).map(|_| { let (w, n) = retry_after(false, backoff); backoff = n; w }).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
+        assert!(waits.iter().all(|&w| w >= 1), "never an immediate retry");
+        // a session that reached READY starts over, whatever failed before it
+        assert_eq!(retry_after(true, 30), (1, 2));
+        assert_eq!(retry_after(false, 0), (1, 2), "a zero backoff still waits");
     }
 
     #[test]

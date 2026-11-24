@@ -1,12 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { get, all, run } from '../db.js';
-import { HttpError, invalid, list, notFound, str } from '../errors.js';
-import { savedObj } from './later.js';
+import { HttpError, notFound, str } from '../errors.js';
+import { parseTags, savedObj } from './later.js';
 
 const MAX_FOLDERS = 50;
 const MAX_FOLDER_NAME = 64;
-const MAX_TAGS = 20;
-const MAX_TAG_LENGTH = 32;
 
 function listFolders(ctx) {
   return all('SELECT * FROM saved_message_folders WHERE user_id = ? ORDER BY created_at ASC', ctx.user.id);
@@ -68,11 +66,7 @@ function updateSavedMessage(ctx) {
   }
 
   let tags = saved.tags;
-  if (ctx.body?.tags !== undefined) {
-    const rawTags = list(ctx.body, 'tags');
-    if (rawTags.length > MAX_TAGS) throw invalid('tags', 'BASE_TYPE_MAX_LENGTH', `At most ${MAX_TAGS} tags.`);
-    tags = JSON.stringify(rawTags.map(t => str({ tags: t }, 'tags', 1, MAX_TAG_LENGTH)));
-  }
+  if (ctx.body?.tags !== undefined) tags = parseTags(ctx.body);
 
   run('UPDATE saved_messages SET folder_id = ?, tags = ? WHERE user_id = ? AND message_id = ?',
     folderId, tags, ctx.user.id, ctx.params.id);

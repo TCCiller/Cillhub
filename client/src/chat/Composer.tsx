@@ -19,10 +19,12 @@ import { Switch } from '../settings/Layout'
 import type { Channel, Draft } from '../types'
 import { resolveMentions, setCachedSnippets, suggest } from './suggest'
 import { VoiceRecorder } from './VoiceRecorder'
+import { limitMb, uploadLimit } from './uploadLimit'
+import { useInstance } from '../admin/instance'
+import { nodeOf } from '../instances/registry'
 
 const TYPING_EVERY_MS = 8000
 export const MAX_FILES = 10
-const MAX_SIZE = 25 * 1024 * 1024
 
 type Ac = { trigger: '@' | '#' | ':' | '!'; query: string; start: number }
 type Props = { channel: Channel; label: string; perms: bigint; files: Draft[]; setFiles: (f: Draft[]) => void; addFiles: (f: File[]) => void }
@@ -44,17 +46,17 @@ function useTick(active: boolean) {
   }, [active])
 }
 
-function FileChip({ d, onChange, onRemove }: { d: Draft; onChange: (d: Draft) => void; onRemove: () => void }) {
+function FileChip({ d, max, onChange, onRemove }: { d: Draft; max: number; onChange: (d: Draft) => void; onRemove: () => void }) {
   const { file } = d
   const url = useMemo(() => (file.type.startsWith('image/') ? URL.createObjectURL(file) : null), [file])
   useEffect(() => () => void (url && URL.revokeObjectURL(url)), [url])
   const [editing, setEditing] = useState(false)
   return (
-    <li className={cls('file-chip', file.size > MAX_SIZE && 'too-big', d.spoiler && 'spoilered')}>
+    <li className={cls('file-chip', file.size > max && 'too-big', d.spoiler && 'spoilered')}>
       {url ? <img src={url} alt={d.description} /> : <Icon d={ICONS.file} size={40} className="file-icon" />}
       {d.spoiler && <span className="chip-spoiler" aria-hidden="true">{t('SPOILER')}</span>}
       <span className="ellipsis">{file.name}</span>
-      <span className="hint small">{file.size > MAX_SIZE ? t('Too large (max 25 MB)') : formatSize(file.size)}</span>
+      <span className="hint small">{file.size > max ? t('Too large (max {n} MB)', { n: limitMb(max) }) : formatSize(file.size)}</span>
       <span className="chip-actions">
         <button className="icon-btn" aria-label={d.spoiler ? t('Remove spoiler from {name}', { name: file.name }) : t('Spoiler {name}', { name: file.name })} aria-pressed={d.spoiler} title={t('Spoiler Attachment')} onClick={() => onChange({ ...d, spoiler: !d.spoiler })}>
           <Icon d={d.spoiler ? ICONS.eyeOff : ICONS.eye} size={16} />
@@ -116,6 +118,7 @@ export function Composer({ channel, label, perms, files, setFiles, addFiles }: P
   const [polling, setPolling] = useState(false)
   const [later, setLater] = useState<string | null>(null) // composed text waiting in the Send later dialog
   const [command, setCommand] = useState<Entry | null>(null)
+  const maxUpload = uploadLimit(useInstance()?.max_upload_bytes, !!nodeOf(channel.id))
   const slash = !command && /^\/[^\n]*$/.test(text) && text.split(' ').length <= 3
   const tokens = useRef<[string, string][]>([]) // inserted "@name" / ":emoji:" -> "<@id>" / "<:emoji:id>"
   const box = useRef<HTMLTextAreaElement>(null)
@@ -147,7 +150,7 @@ export function Composer({ channel, label, perms, files, setFiles, addFiles }: P
   const pickCommand = (e: Entry) => (setCommand(e), onTextChange(''), setAc(null))
   const items = ac && !commands.length ? suggest(getState(), channel, perms, ac.trigger, ac.query) : []
   const active = items[Math.min(sel, items.length - 1)]
-  const tooBig = files.some((f) => f.file.size > MAX_SIZE)
+  const tooBig = files.some((f) => f.file.size > maxUpload)
   const archived = !!channel.thread_metadata?.archived
 
   // Restore draft when switching channels
@@ -364,7 +367,7 @@ export function Composer({ channel, label, perms, files, setFiles, addFiles }: P
         {files.length > 0 && (
           <ul className="file-chips" aria-label={t('Attachments to send')}>
             {files.map((f, i) => (
-              <FileChip key={`${f.file.name}-${i}`} d={f} onChange={(d) => setFiles(files.with(i, d))} onRemove={() => setFiles(files.filter((_, j) => j !== i))} />
+              <FileChip key={`${f.file.name}-${i}`} d={f} max={maxUpload} onChange={(d) => setFiles(files.with(i, d))} onRemove={() => setFiles(files.filter((_, j) => j !== i))} />
             ))}
           </ul>
         )}

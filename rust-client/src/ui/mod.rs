@@ -611,6 +611,11 @@ impl CillhubApp {
         }
         self.gateway_rx = None;
         self.gateway_cmd_tx = None;
+        if let Some((origin, token)) = self.api.as_ref().and_then(|a| {
+            a.token.as_ref().filter(|t| !t.is_empty()).map(|t| (a.origin.origin().ascii_serialization(), t.clone()))
+        }) {
+            self.sign_out_later(&origin, token);
+        }
         self.forget_nodes();
         self.hub_user.clear();
         self.node_view = None;
@@ -2820,6 +2825,103 @@ mod tests {
         assert!(app.lightbox.is_none() && app.images.is_empty());
         assert!(app.state.guilds.is_empty() && app.state.me.is_none());
         assert!(app.selected_guild_id.is_none() && app.selected_channel_id.is_none());
+    }
+
+    #[test]
+    fn logout_revokes_hub_token_in_background_and_clears_local_state() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(false).unwrap();
+        let hub = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            std::thread::sleep(Duration::from_millis(150));
+            let _ = sock.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+
+        let origin = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let mut app = CillhubApp::new(None, true);
+        app.authenticated = true;
+        app.api = Some(ApiClient::new(origin, Some("hub-secret-token".into())));
+
+        let started = Instant::now();
+        app.logout();
+        assert!(started.elapsed() < Duration::from_millis(120), "logout() must not block on hub HTTP");
+        assert!(!app.authenticated && app.api.is_none() && app.state.guilds.is_empty());
+        assert_eq!(app.settings.pending_revokes.len(), 1, "hub sign-out must be recorded in pending_revokes");
+
+        let req = hub.join().unwrap();
+        assert!(req.starts_with("POST /api/v9/auth/logout "), "expected logout POST, got: {req}");
+        assert!(req.to_ascii_lowercase().contains("authorization: hub-secret-token"), "missing hub token: {req}");
+
+        let wait = Instant::now();
+        while !app.settings.pending_revokes.is_empty() {
+            assert!(wait.elapsed() < Duration::from_secs(5), "confirmed hub sign-out stayed pending");
+            app.tick_nodes();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn logout_with_unreachable_hub_keeps_pending_revoke_across_forget_and_prune_and_retries() {
+        use std::io::{Read, Write};
+        // Grab an unused local port and close it so the initial logout attempt hits connection refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let hub_origin = format!("http://127.0.0.1:{port}");
+        let mut app = CillhubApp::new(None, true);
+        app.authenticated = true;
+        app.api = Some(ApiClient::new(Url::parse(&hub_origin).unwrap(), Some("hub-retry-token".into())));
+
+        app.logout();
+        assert_eq!(app.settings.pending_revokes.len(), 1, "unreachable hub sign-out must stay pending");
+        assert!(
+            app.settings.pending_revoke_list().iter().any(|(_, o, t)| o == &hub_origin && t == "hub-retry-token"),
+            "journal must hold hub origin and token: {:?}",
+            app.settings.pending_revoke_list()
+        );
+
+        // Hub entry must survive both forget_nodes() and prune_pending_revokes().
+        app.forget_nodes();
+        app.settings.prune_pending_revokes();
+        assert_eq!(app.settings.pending_revokes.len(), 1, "hub entry must survive forget_nodes and prune_pending_revokes");
+
+        // Persist and reload settings (simulating restart) then bring the hub back answering 401.
+        let tmp = std::env::temp_dir().join(format!("cillhub-hub-revoke-{}.json", std::process::id()));
+        app.settings.save_to(&tmp).unwrap();
+        let reloaded = crate::settings::AppSettings::load_from(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(reloaded.pending_revokes.len(), 1);
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let hub = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let body = r#"{"code":40001,"message":"401: Unauthorized"}"#;
+            let resp = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+
+        let mut app2 = CillhubApp::new(None, true);
+        app2.settings = reloaded;
+        app2.retry_revokes();
+        let req = hub.join().unwrap();
+        assert!(req.starts_with("POST /api/v9/auth/logout "), "got: {req}");
+        assert!(req.to_ascii_lowercase().contains("authorization: hub-retry-token"), "got: {req}");
+
+        let wait = Instant::now();
+        while !app2.settings.pending_revokes.is_empty() {
+            assert!(wait.elapsed() < Duration::from_secs(5), "401 answer must clear pending hub revoke");
+            app2.tick_nodes();
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

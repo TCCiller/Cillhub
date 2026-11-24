@@ -44,6 +44,36 @@ if (!fs.existsSync(linuxBin)) {
 if (!fs.existsSync(winBin)) {
   throw new Error(`missing ${winBin}: run "npm run build:windows" first`);
 }
+
+// Verify both built binaries embed the exact version being published before staging or signing anything.
+// Searches raw bytes for the NUL-terminated marker compiled into rust-client/src/lib.rs so the Windows
+// binary is checked without executing it on the Linux build host.
+const VERSION_MARKER_PREFIX = 'CILLHUB_NATIVE_VERSION=';
+function extractBinaryVersions(file) {
+  const buf = fs.readFileSync(file);
+  const needle = Buffer.from(VERSION_MARKER_PREFIX, 'ascii');
+  const found = new Set();
+  let at = 0;
+  while ((at = buf.indexOf(needle, at)) !== -1) {
+    const start = at + needle.length;
+    const end = buf.indexOf(0, start);
+    if (end > start && end - start <= 64) {
+      const v = buf.subarray(start, end).toString('utf8');
+      if (/^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.+-]+)?$/.test(v)) found.add(v);
+    }
+    at = start;
+  }
+  return [...found];
+}
+function assertBinaryVersion(file, expected) {
+  const found = extractBinaryVersions(file);
+  if (found.length === 1 && found[0] === expected) return;
+  const got = found.length ? found.join(', ') : 'none';
+  throw new Error(`${file} carries version ${got}, expected ${expected}: rebuild before publishing`);
+}
+assertBinaryVersion(linuxBin, version);
+assertBinaryVersion(winBin, version);
+
 if (!fs.existsSync(winSetup)) {
   execFileSync('makensis', [`-DVERSION=${version}`, path.join(PROJECT_DIR, 'installer.nsi')], {
     cwd: PROJECT_DIR,
@@ -178,9 +208,6 @@ try {
   for (const [name, sig] of Object.entries(sigs)) put(name, sig); // before the feeds, like the installers
 
   // 7. Render and atomically publish download-page/index.html -> <ROOT>/index.html
-  const winFile = `Cillhub-Setup-${version}.exe`;
-  const appImage = `Cillhub-${version}.AppImage`;
-  const deb = `cillhub_${version}_amd64.deb`;
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   const date = new Date().toLocaleDateString('en-GB', {
     day: 'numeric',
@@ -192,14 +219,15 @@ try {
     HUB: PROD_HUB,
     VERSION: version,
     RELEASE_DATE: date,
-    WIN_FILE: encodeURI(winFile),
-    APPIMAGE_FILE: encodeURI(appImage),
-    DEB_FILE: encodeURI(deb),
   };
   const page = fs
     .readFileSync(path.join(PROJECT_DIR, 'download-page', 'index.html'), 'utf8')
     .replace(/\{\{(\w+)\}\}/g, (m, k) => (k in vars ? esc(vars[k]) : m));
   if (/\{\{\w+\}\}/.test(page)) throw new Error('unfilled template variable in download page');
+  // every desktop download the page links must be a file published above (the old app's names 404ed)
+  for (const [, f] of page.matchAll(/\/download\/desktop\/([^"<\s]+)/g)) {
+    if (!(decodeURI(f) in rustArtifacts)) throw new Error(`download page links ${f}, which is not published`);
+  }
   put('index.html', page, ROOT);
 
   // 8. Feeds last, so clients only see a new version once its files are in place.

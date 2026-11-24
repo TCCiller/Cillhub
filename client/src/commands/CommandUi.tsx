@@ -8,6 +8,9 @@ import { displayName, getState, setState, useStore } from '../store'
 import type { Channel, CommandOption } from '../types'
 import { autocomplete, runCommand, type Entry, type Values } from './commands'
 import './commands.css'
+import { useInstance } from '../admin/instance'
+import { nodeOf } from '../instances/registry'
+import { limitMb, uploadLimit } from '../chat/uploadLimit'
 
 /** Matching commands for `/query`. */
 export function CommandPicker({ entries, sel, listId, onPick, onHover }: { entries: Entry[]; sel: number; listId: string; onPick: (e: Entry) => void; onHover: (i: number) => void }) {
@@ -28,8 +31,6 @@ export function CommandPicker({ entries, sel, listId, onPick, onHover }: { entri
     </div>
   )
 }
-
-const MAX_UPLOAD = 25 * 1024 * 1024 // the server's attachment_size_limit
 
 const TYPE_HINT: Record<number, string> = { 3: 'text', 4: 'integer', 5: 'True or False', 6: 'user', 7: 'channel', 8: 'role', 9: 'user or role', 10: 'number', 11: 'file' }
 
@@ -103,6 +104,7 @@ export function CommandForm({ channel, entry, onClose }: { channel: Channel; ent
   const [values, setValues] = useState<Values>({})
   const [shown, setShown] = useState<string[]>(() => entry.options.filter((o) => o.required).map((o) => o.name))
   const [error, setError] = useState('')
+  const maxUpload = uploadLimit(useInstance()?.max_upload_bytes, !!nodeOf(channel.id)) // the server's attachment_size_limit
   const optional = entry.options.filter((o) => !o.required && !shown.includes(o.name))
   useEffect(() => setState({ autocomplete: null }), [])
   const submit = () => {
@@ -110,8 +112,8 @@ export function CommandForm({ channel, entry, onClose }: { channel: Channel; ent
     if (missing) return setError(t('{name} is required.', { name: missing.name }))
     const bad = entry.options.find((o) => (o.type === 4 || o.type === 10) && values[o.name] !== undefined && values[o.name] !== '' && Number.isNaN(Number(values[o.name])))
     if (bad) return setError(t('{name} must be a number.', { name: bad.name }))
-    const big = entry.options.find((o) => o.type === 11 && values[o.name] instanceof File && (values[o.name] as File).size > MAX_UPLOAD)
-    if (big) return setError(t('Files must be {size} or smaller.', { size: '25 MB' }))
+    const big = entry.options.find((o) => o.type === 11 && values[o.name] instanceof File && (values[o.name] as File).size > maxUpload)
+    if (big) return setError(t('Files must be {size} or smaller.', { size: `${limitMb(maxUpload)} MB` }))
     onClose()
     void runCommand(channel, entry, values).catch(toastError)
   }

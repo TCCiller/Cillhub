@@ -144,4 +144,20 @@ test('saved folders and message tags enforce type, length and count bounds', asy
   assert.equal(maxTagRes.status, 200);
   assert.equal(maxTagRes.body.save_data.tags.length, 20);
   assert.equal(maxTagRes.body.save_data.tags[0], maxTag);
+
+  const saveMsg = (await api('POST', `/channels/${g.general.id}/messages`, bob.token, { content: 'Save route tag bounds test' })).body;
+  for (const badTags of [null, 'tag', 123, {}, [''], ['   '], [123], [{}], [overTag], ['ok', overTag], twentyOneTags]) {
+    const res = await api('PUT', `/users/@me/saved-messages/${g.general.id}/${saveMsg.id}`, alice.token, { tags: badTags });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 50035);
+  }
+
+  const validSaveTags = [`  ${maxTag}  `, ...twentyTags.slice(1)];
+  const expectedSaveTags = [maxTag, ...twentyTags.slice(1)];
+  const savedWithTags = await api('PUT', `/users/@me/saved-messages/${g.general.id}/${saveMsg.id}`, alice.token, {
+    tags: validSaveTags,
+  });
+  assert.equal(savedWithTags.status, 200);
+  assert.deepEqual(savedWithTags.body.tags, expectedSaveTags);
+  assert.deepEqual(savedWithTags.body.save_data.tags, expectedSaveTags);
 });

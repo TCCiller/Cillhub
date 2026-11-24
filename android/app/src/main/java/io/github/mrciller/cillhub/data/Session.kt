@@ -254,9 +254,9 @@ object Session {
                 replyTo?.let { putJsonObject("message_reference") { put("message_id", it) } }
                 if (ups.isNotEmpty()) putJsonArray("attachments") { ups.forEachIndexed { i, f -> add(buildJsonObject { put("id", i.toString()); put("filename", f.name) }) } }
             }
-            val text = if (ups.isEmpty()) rest.request("POST", "/channels/${ch.id}/messages", payload, retry = false)
+            val msg: Message = if (ups.isEmpty()) rest.call("POST", "/channels/${ch.id}/messages", payload, retry = false)
             else rest.multipart("/channels/${ch.id}/messages", payload, ups, progress)
-            json.decodeFromString<Message>(text).also { if (key != null) E2ee.remember(it, content, refs) }
+            msg.also { if (key != null) E2ee.remember(it, content, refs) }
         }
     }
 
@@ -271,15 +271,15 @@ object Session {
             val r = e2eeRetry { fresh ->
                 val key = E2ee.sendKey(ch ?: E2ee.channel(m.channelId), fresh) ?: throw Exception(app.getString(io.github.mrciller.cillhub.R.string.e2ee_cannot_encrypt))
                 val env = json.encodeToJsonElement(Envelope.serializer(), E2ee.seal(m.channelId, key, content, files))
-                rest.request("PATCH", "/channels/${m.channelId}/messages/${m.id}", buildJsonObject { put("e2ee_envelope", env) })
+                rest.call<JsonObject>("PATCH", "/channels/${m.channelId}/messages/${m.id}", buildJsonObject { put("e2ee_envelope", env) })
             }
-            E2ee.remember(json.decodeFromString<Message>(r), content, files)
-            store.dispatch("MESSAGE_UPDATE", json.parseToJsonElement(r).jsonObject)
+            E2ee.remember(Rest.decode(r.toString()), content, files)
+            store.dispatch("MESSAGE_UPDATE", r)
             return
         }
         E2ee.refusePlain(ch)
-        val r = rest.request("PATCH", "/channels/${m.channelId}/messages/${m.id}", buildJsonObject { put("content", content) })
-        store.dispatch("MESSAGE_UPDATE", json.parseToJsonElement(r).jsonObject)
+        val r = rest.call<JsonObject>("PATCH", "/channels/${m.channelId}/messages/${m.id}", buildJsonObject { put("content", content) })
+        store.dispatch("MESSAGE_UPDATE", r)
     }
 
     /** Reports a message to the instance admins; an encrypted one hands over its message key (and those of [context]). */
@@ -493,8 +493,7 @@ object Session {
             }
         }
         E2ee.refusePlain(store.value.channels[channelId])
-        val text = rest.request("POST", "/channels/$channelId/messages", payload)
-        val msg = json.decodeFromString<Message>(text)
+        val msg = rest.call<Message>("POST", "/channels/$channelId/messages", payload)
         store.update { Reducer.addMessage(it, msg) }
     }
 
@@ -521,8 +520,7 @@ object Session {
     }
 
     suspend fun expirePoll(m: Message) {
-        val text = rest.request("POST", "/channels/${m.channelId}/polls/${m.id}/expire")
-        val updated = json.decodeFromString<Message>(text)
+        val updated = rest.call<Message>("POST", "/channels/${m.channelId}/polls/${m.id}/expire")
         store.update { Reducer.patchMessage(it, m.channelId, m.id) { updated } }
     }
 

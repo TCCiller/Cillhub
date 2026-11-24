@@ -1,7 +1,7 @@
 // v5: scheduled messages ("Send later", Cillhub routes) and saved messages with reminders (user docs: /users/@me/saved-messages)
 import { snowflake } from '../snowflake.js';
 import { get, all, run, userById, channelUserIds, json } from '../db.js';
-import { HttpError, invalid, notFound, missingAccess, str } from '../errors.js';
+import { HttpError, invalid, list, notFound, missingAccess, str } from '../errors.js';
 import { P, has, need, channelPerms, isThread, MESSAGEABLE } from '../permissions.js';
 import { sendToUsers } from '../gateway.js';
 import { prepare, send, checkVerification, checkThreadOpen, checkSlowmode, markSent } from '../compose.js';
@@ -18,6 +18,8 @@ const MAX_SCHEDULED = 25;
 const MAX_RECURRING = 25; // per author and per channel
 const RECURRING_PER_RUN = 5; // per channel and run; the rest moves to the next run, a minute later
 const MAX_SAVED = 200; // docs
+const MAX_TAGS = 20;
+const MAX_TAG_LENGTH = 32;
 const YEAR = 365 * 24 * 3600 * 1000;
 const KEPT = ['content', 'flags', 'message_reference', 'allowed_mentions', 'sticker_ids'];
 
@@ -172,6 +174,12 @@ export function savedObj(r) {
   };
 }
 
+export function parseTags(body) {
+  const rawTags = list(body, 'tags');
+  if (rawTags.length > MAX_TAGS) throw invalid('tags', 'BASE_TYPE_MAX_LENGTH', `At most ${MAX_TAGS} tags.`);
+  return JSON.stringify(rawTags.map(t => str({ tags: t }, 'tags', 1, MAX_TAG_LENGTH)));
+}
+
 function save(ctx) {
   const ch = loadChannel(ctx.params.channel_id, ctx.user);
   need(ch.perms, P.READ_MESSAGE_HISTORY);
@@ -181,7 +189,7 @@ function save(ctx) {
   if (folderId !== null && (typeof folderId !== 'string' || !get('SELECT 1 FROM saved_message_folders WHERE id = ? AND user_id = ?', folderId, ctx.user.id))) {
     throw notFound(10008, 'Folder');
   }
-  const tags = Array.isArray(ctx.body?.tags) ? JSON.stringify(ctx.body.tags) : '[]';
+  const tags = ctx.body?.tags !== undefined ? parseTags(ctx.body) : '[]';
   const exists = get('SELECT 1 FROM saved_messages WHERE user_id = ? AND message_id = ?', ctx.user.id, ctx.params.message_id);
   if (!exists && get('SELECT COUNT(*) AS n FROM saved_messages WHERE user_id = ?', ctx.user.id).n >= MAX_SAVED) {
     throw new HttpError(400, 0, `Maximum number of saved messages reached (${MAX_SAVED})`);

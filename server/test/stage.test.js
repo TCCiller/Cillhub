@@ -167,3 +167,24 @@ test('voice moderation honours channel overwrites and stage suppression enforces
   assert.equal((await api('PATCH', `/guilds/${g.guild.id}/voice-states/${alice.id}`, bob.token, { channel_id: stage.id, suppress: true })).status, 403);
   join(alice, null);
 });
+
+test('stage hand-raise refuses years outside 0000-9999, accepts 9999, and clamps past times to now', async () => {
+  join(bob, stage.id);
+  await state(alice, d => d.user_id === bob.id && d.channel_id === stage.id);
+  const me = `/guilds/${g.guild.id}/voice-states/@me`;
+  for (const bad of ['+010000-01-01T00:00:00Z', '-000001-01-01T00:00:00Z', 'not-a-date', 12345]) {
+    const r = await api('PATCH', me, bob.token, { channel_id: stage.id, request_to_speak_timestamp: bad });
+    assert.deepEqual([r.status, r.body?.code], [400, 50035], String(bad));
+  }
+  const max = '9999-12-31T23:59:59.000Z';
+  assert.equal((await api('PATCH', me, bob.token, { channel_id: stage.id, request_to_speak_timestamp: max })).status, 204);
+  assert.equal((await api('GET', me, bob.token)).body.request_to_speak_timestamp, max);
+
+  const before = Date.now() - 1000;
+  assert.equal((await api('PATCH', me, bob.token, { channel_id: stage.id, request_to_speak_timestamp: '2020-01-01T00:00:00.000Z' })).status, 204);
+  const after = Date.now() + 1000;
+  const got = (await api('GET', me, bob.token)).body.request_to_speak_timestamp;
+  assert.match(got, /^\d{4}-/);
+  assert.ok(Date.parse(got) >= before && Date.parse(got) <= after, `expected clamped to now, got ${got}`);
+  join(bob, null);
+});

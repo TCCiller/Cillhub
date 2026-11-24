@@ -491,7 +491,7 @@ object E2ee {
     /** Downloads and decrypts a file into app-private cache (gone at logout); the path to show, play or share. */
     suspend fun decryptFile(a: Attachment): File = withContext(Dispatchers.IO) {
         val dir = File(app.cacheDir, "e2ee").apply { mkdirs() }
-        val out = File(dir, a.id + "-" + a.filename.replace(Regex("[^A-Za-z0-9._ -]"), "_").take(100))
+        val out = decryptedFile(dir, a.id, a.filename) ?: throw err(R.string.e2ee_file_failed)
         if (out.exists()) return@withContext out
         val data = Api.http.newCall(Request.Builder().url(Config.cdn(a.url)).build()).execute().use { res ->
             if (!res.isSuccessful) throw err(R.string.e2ee_file_failed)
@@ -501,4 +501,15 @@ object E2ee {
         File(dir, out.name + ".part").apply { writeBytes(plain); renameTo(out) }
         out
     }
+}
+
+/**
+ * Where a decrypted attachment is kept: a file directly in [dir], or null. The server picks attachment ids and is not
+ * trusted with an encrypted DM: an id like "../../shared_prefs/x" would write the plaintext outside the cache, or show an
+ * existing app-private file as the attachment. Ids are snowflakes; the name is reduced to safe characters.
+ */
+internal fun decryptedFile(dir: File, id: String, filename: String): File? {
+    if (!Regex("^\\d{1,20}$").matches(id)) return null
+    val f = File(dir, id + "-" + filename.replace(Regex("[^A-Za-z0-9._ -]"), "_").take(100))
+    return f.takeIf { it.canonicalFile.parentFile == dir.canonicalFile }
 }

@@ -2097,10 +2097,16 @@ pub fn stamp(iso: &str) -> String {
     }
 }
 
-/// <t:unix:style> in local time: t/T time, d/D date, the rest date and time.
-fn unix_time(unix: i64, style: char) -> String {
-    use chrono::TimeZone;
-    let Some(t) = chrono::Local.timestamp_opt(unix, 0).single().map(|t| t.naive_local()) else {
+/// Display range 0001-01-01T00:00:00Z ..= 9999-12-31T23:59:59Z: keeps dates to 4-digit years
+/// and safely inside chrono's NaiveDateTime bounds for every timezone offset.
+const MIN_DISPLAY_UNIX: i64 = -62_135_596_800;
+const MAX_DISPLAY_UNIX: i64 = 253_402_300_799;
+
+fn unix_time_in<Tz: chrono::TimeZone>(unix: i64, style: char, tz: &Tz) -> String {
+    if !(MIN_DISPLAY_UNIX..=MAX_DISPLAY_UNIX).contains(&unix) {
+        return unix.to_string();
+    }
+    let Some(t) = tz.timestamp_opt(unix, 0).single().map(|t| t.naive_local()) else {
         return unix.to_string();
     };
     match style {
@@ -2108,6 +2114,11 @@ fn unix_time(unix: i64, style: char) -> String {
         'd' | 'D' => short_date(&t),
         _ => format!("{} {}", short_date(&t), clock(&t)),
     }
+}
+
+/// <t:unix:style> in local time: t/T time, d/D date, the rest date and time.
+fn unix_time(unix: i64, style: char) -> String {
+    unix_time_in(unix, style, &chrono::Local)
 }
 
 /// Size of an inline image like the web client (chat/Attachments.tsx fit): only the types the
@@ -2174,6 +2185,50 @@ mod tests {
         assert_eq!(inline_image_size(&att("image/webp", None, None)), Some(Vec2::new(400.0, 300.0)));
         assert_eq!(inline_image_size(&att("image/svg+xml", Some(10), Some(10))), None);
         assert_eq!(inline_image_size(&att("application/pdf", None, None)), None);
+    }
+
+    #[test]
+    fn unix_time_handles_extreme_timestamps_in_any_timezone() {
+        let east14 = chrono::FixedOffset::east_opt(14 * 3600).unwrap();
+        let west12 = chrono::FixedOffset::west_opt(12 * 3600).unwrap();
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+
+        let extremes = [
+            chrono::DateTime::<chrono::Utc>::MAX_UTC.timestamp(), // 8_210_266_876_799 (year 262142)
+            chrono::DateTime::<chrono::Utc>::MIN_UTC.timestamp(), // -8_334_601_228_800 (year -262143)
+            8_640_000_000_000,
+            -8_640_000_000_000,
+        ];
+        for unix in extremes {
+            let expected = unix.to_string();
+            for tz in [&east14, &west12, &utc] {
+                assert_eq!(unix_time_in(unix, 'f', tz), expected);
+            }
+            assert_eq!(unix_time(unix, 'f'), expected);
+        }
+
+        // Zero and an ordinary timestamp still format as dates.
+        assert_eq!(unix_time_in(0, 'f', &east14), "1/1/1970 02:00 PM");
+        assert_eq!(unix_time_in(0, 'f', &west12), "12/31/1969 12:00 PM");
+        assert_eq!(unix_time_in(1_700_000_000, 'f', &utc), "11/14/2023 10:13 PM");
+        assert_eq!(unix_time_in(1_700_000_000, 'd', &utc), "11/14/2023");
+        assert_eq!(unix_time_in(1_700_000_000, 't', &utc), "10:13 PM");
+        assert_ne!(unix_time(0, 'f'), "0");
+        assert_ne!(unix_time(1_700_000_000, 'f'), "1700000000");
+
+        // Bounds match 0001-01-01T00:00:00Z and 9999-12-31T23:59:59Z and format safely at both ends.
+        assert_eq!(MIN_DISPLAY_UNIX, chrono::NaiveDate::from_ymd_opt(1, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp());
+        assert_eq!(MAX_DISPLAY_UNIX, chrono::NaiveDate::from_ymd_opt(9999, 12, 31).unwrap().and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp());
+        assert_ne!(unix_time_in(MIN_DISPLAY_UNIX, 'f', &west12), MIN_DISPLAY_UNIX.to_string());
+        assert_ne!(unix_time_in(MAX_DISPLAY_UNIX, 'f', &east14), MAX_DISPLAY_UNIX.to_string());
+        assert_eq!(unix_time_in(MIN_DISPLAY_UNIX - 1, 'f', &utc), (MIN_DISPLAY_UNIX - 1).to_string());
+        assert_eq!(unix_time_in(MAX_DISPLAY_UNIX + 1, 'f', &utc), (MAX_DISPLAY_UNIX + 1).to_string());
+
+        // RFC 3339 rejects years outside 0000-9999 and accepts 0000..=9999 without panicking.
+        assert!(local_time("+262142-12-31T23:59:59Z").is_none());
+        assert!(local_time("-262143-01-01T00:00:00Z").is_none());
+        assert!(local_time("0000-01-01T00:00:00Z").is_some());
+        assert!(local_time("9999-12-31T23:59:59Z").is_some());
     }
 }
 

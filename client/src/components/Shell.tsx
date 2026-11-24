@@ -1,6 +1,7 @@
 import { tokenOf, useInstances } from '../instances/registry'
 import { useEffect } from 'react'
-import { loadMembers, loadSettings, openMessage } from '../actions'
+import { loadMyMember, loadSettings, openMessage } from '../actions'
+import { ensureOwnMembers } from '../members'
 import { IncomingCall } from '../calls/IncomingCall'
 import { InteractionModalView } from '../components-ui/InteractionModal'
 import { GroupDmModal, GroupMembers } from '../friends/GroupDm'
@@ -94,12 +95,7 @@ const requested = new Set<string>()
 function useOwnMembers() {
   const s = useStore((x) => x)
   useEffect(() => {
-    if (s.status !== 'ready') return
-    for (const id of Object.keys(s.guilds))
-      if (!myMember(s, id) && !s.membersLoaded[id] && !requested.has(id)) {
-        requested.add(id)
-        loadMembers(id).catch(() => requested.delete(id))
-      }
+    ensureOwnMembers(s, requested, loadMyMember)
   })
 }
 

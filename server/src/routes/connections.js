@@ -1,6 +1,27 @@
 import { randomUUID } from 'node:crypto';
 import { get, all, run, json } from '../db.js';
-import { HttpError, notFound } from '../errors.js';
+import { HttpError, invalid, notFound, str } from '../errors.js';
+import { isHttp } from '../embeds.js';
+
+const MAX_CONNECTIONS = 25;
+const MAX_TYPE = 32;
+const MAX_NAME = 100;
+const MAX_METADATA_BYTES = 1024;
+const TYPE_SLUG = /^[a-z0-9][a-z0-9_-]*$/;
+
+function metadataField(body) {
+  const v = body?.metadata;
+  if (v == null) return null;
+  if (typeof v !== 'object' || Array.isArray(v)) throw invalid('metadata', 'BASE_TYPE_OBJECT', 'Must be a JSON object.');
+  if (v.profile_url != null && !isHttp(v.profile_url)) {
+    throw invalid('metadata.profile_url', 'URL_TYPE_INVALID_URL', 'Not a well formed http(s) URL.');
+  }
+  const raw = JSON.stringify(v);
+  if (Buffer.byteLength(raw, 'utf8') > MAX_METADATA_BYTES) {
+    throw invalid('metadata', 'BASE_TYPE_MAX_LENGTH', `Must be at most ${MAX_METADATA_BYTES} bytes.`);
+  }
+  return raw;
+}
 
 function connectionObj(r) {
   return {
@@ -20,19 +41,22 @@ function listConnections(ctx) {
 }
 
 function createConnection(ctx) {
-  const type = String(ctx.body?.type || '').trim().toLowerCase();
-  const name = String(ctx.body?.name || '').trim();
-  if (!type) throw new HttpError(400, 50035, 'Connection type is required');
-  if (!name) throw new HttpError(400, 50035, 'Account name is required');
+  const b = ctx.body ?? {};
+  const type = str(b, 'type', 1, MAX_TYPE).toLowerCase();
+  if (!TYPE_SLUG.test(type)) throw invalid('type', 'BASE_TYPE_BAD_VALUE', 'Must be a lower-case slug (letters, digits, _ or -).');
+  const name = str(b, 'name', 1, MAX_NAME);
+  const metadata = metadataField(b);
 
   const existing = get('SELECT id FROM user_connections WHERE user_id = ? AND type = ? AND name = ?', ctx.user.id, type, name);
   if (existing) {
     throw new HttpError(400, 50035, 'Connection already exists');
   }
+  if (get('SELECT COUNT(*) AS n FROM user_connections WHERE user_id = ?', ctx.user.id).n >= MAX_CONNECTIONS) {
+    throw new HttpError(400, 50035, `Maximum number of connections reached (${MAX_CONNECTIONS})`);
+  }
 
   const id = randomUUID();
-  const showOnProfile = ctx.body?.show_on_profile !== undefined ? (ctx.body.show_on_profile ? 1 : 0) : 1;
-  const metadata = ctx.body?.metadata ? JSON.stringify(ctx.body.metadata) : null;
+  const showOnProfile = b.show_on_profile !== undefined ? (b.show_on_profile ? 1 : 0) : 1;
   const createdAt = new Date().toISOString();
 
   run(`
@@ -49,13 +73,14 @@ function updateConnection(ctx) {
   const conn = get('SELECT * FROM user_connections WHERE id = ? AND user_id = ?', ctx.params.id, ctx.user.id);
   if (!conn) throw notFound(10013, 'Connection');
 
+  const b = ctx.body ?? {};
   let showOnProfile = conn.show_on_profile;
-  if (ctx.body?.show_on_profile !== undefined) {
-    showOnProfile = ctx.body.show_on_profile ? 1 : 0;
+  if (b.show_on_profile !== undefined) {
+    showOnProfile = b.show_on_profile ? 1 : 0;
   }
   let metadata = conn.metadata;
-  if (ctx.body?.metadata !== undefined) {
-    metadata = ctx.body.metadata ? JSON.stringify(ctx.body.metadata) : null;
+  if (b.metadata !== undefined) {
+    metadata = metadataField(b);
   }
 
   run('UPDATE user_connections SET show_on_profile = ?, metadata = ? WHERE id = ? AND user_id = ?',

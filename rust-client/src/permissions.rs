@@ -153,16 +153,31 @@ pub fn is_voice(channel: &Channel) -> bool {
     matches!(channel.kind, 2 | 13)
 }
 
-pub fn is_timed_out(member: Option<&Member>) -> bool {
-    let Some(m) = member else { return false };
-    let Some(until) = m.communication_disabled_until.as_deref() else {
-        return false;
-    };
-    !until.is_empty() && until > "1970"
+fn now_utc() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
 }
 
-/// Guild-level permissions of a member (step 1).
-pub fn base_perms(guild: &Guild, user_id: &str, member: Option<&Member>) -> u64 {
+/// True only while `communication_disabled_until` parses as RFC 3339 and lies strictly after `now`.
+pub fn is_timed_out_at(member: Option<&Member>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let Some(until) = member.and_then(|m| m.communication_disabled_until.as_deref()) else {
+        return false;
+    };
+    chrono::DateTime::parse_from_rfc3339(until)
+        .map(|t| t.with_timezone(&chrono::Utc) > now)
+        .unwrap_or(false)
+}
+
+pub fn is_timed_out(member: Option<&Member>) -> bool {
+    is_timed_out_at(member, now_utc())
+}
+
+/// Guild-level permissions of a member (step 1) evaluated at `now`.
+pub fn base_perms_at(
+    guild: &Guild,
+    user_id: &str,
+    member: Option<&Member>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u64 {
     if guild.owner_id == user_id {
         return p::ALL;
     }
@@ -183,22 +198,28 @@ pub fn base_perms(guild: &Guild, user_id: &str, member: Option<&Member>) -> u64 
     if has(base, p::ADMINISTRATOR) {
         return p::ALL;
     }
-    if is_timed_out(member) || member.is_some_and(|m| m.pending) {
+    if is_timed_out_at(member, now) || member.is_some_and(|m| m.pending) {
         base & p::READ_ONLY
     } else {
         base
     }
 }
 
-/// Channel permissions of a member (steps 2 and 3).
-pub fn channel_perms(
+/// Guild-level permissions of a member (step 1).
+pub fn base_perms(guild: &Guild, user_id: &str, member: Option<&Member>) -> u64 {
+    base_perms_at(guild, user_id, member, now_utc())
+}
+
+/// Channel permissions of a member (steps 2 and 3) evaluated at `now`.
+pub fn channel_perms_at(
     guild: &Guild,
     user_id: &str,
     member: Option<&Member>,
     channel: &Channel,
     parent: Option<&Channel>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> u64 {
-    let mut perms = base_perms(guild, user_id, member);
+    let mut perms = base_perms_at(guild, user_id, member, now);
     if perms == p::ALL {
         return p::ALL;
     }
@@ -226,7 +247,7 @@ pub fn channel_perms(
     if let Some(own) = ows.iter().find(|o| o.kind == 1 && o.id == user_id) {
         perms = (perms & !parse_bits(&own.deny)) | parse_bits(&own.allow);
     }
-    if is_timed_out(member) || member.is_some_and(|m| m.pending) {
+    if is_timed_out_at(member, now) || member.is_some_and(|m| m.pending) {
         perms &= p::READ_ONLY;
     }
     if !has(perms, p::VIEW_CHANNEL) {
@@ -266,6 +287,17 @@ pub fn channel_perms(
             | p::USE_EXTERNAL_SOUNDS);
     }
     perms
+}
+
+/// Channel permissions of a member (steps 2 and 3).
+pub fn channel_perms(
+    guild: &Guild,
+    user_id: &str,
+    member: Option<&Member>,
+    channel: &Channel,
+    parent: Option<&Channel>,
+) -> u64 {
+    channel_perms_at(guild, user_id, member, channel, parent, now_utc())
 }
 
 pub fn rank(guild: &Guild, user_id: &str, member: Option<&Member>) -> i32 {
@@ -429,5 +461,89 @@ mod tests {
             channel_perms(&g, "u", Some(&m), &thread, Some(&ch)),
             p::SEND_MESSAGES
         ));
+    }
+
+    #[test]
+    fn timeout_compares_against_now_and_handles_formats() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-24T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let full = p::VIEW_CHANNEL | p::READ_MESSAGE_HISTORY | p::SEND_MESSAGES | p::ADD_REACTIONS;
+        let g = Guild {
+            id: "g".into(),
+            name: "Arena".into(),
+            owner_id: "owner".into(),
+            roles: vec![
+                Role {
+                    id: "g".into(),
+                    name: "@everyone".into(),
+                    position: 0,
+                    permissions: full.to_string(),
+                    ..Default::default()
+                },
+                Role {
+                    id: "admin".into(),
+                    name: "Admin".into(),
+                    position: 1,
+                    permissions: p::ADMINISTRATOR.to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        // User overwrite grants SEND_MESSAGES too, to verify channel_perms applies READ_ONLY after overwrites.
+        let ch = Channel {
+            id: "c".into(),
+            kind: 0,
+            permission_overwrites: vec![Overwrite {
+                id: "u".into(),
+                kind: 1,
+                allow: p::SEND_MESSAGES.to_string(),
+                deny: "0".into(),
+            }],
+            ..Default::default()
+        };
+        let member_with = |until: Option<&str>, roles: Vec<&str>| Member {
+            roles: roles.into_iter().map(String::from).collect(),
+            communication_disabled_until: until.map(String::from),
+            ..Default::default()
+        };
+
+        // Past timestamp: timeout ended -> full permissions in base and channel.
+        let past = member_with(Some("2026-11-24T11:59:59Z"), vec![]);
+        assert!(!is_timed_out_at(Some(&past), now));
+        assert_eq!(base_perms_at(&g, "u", Some(&past), now), full);
+        assert_eq!(channel_perms_at(&g, "u", Some(&past), &ch, None, now), full);
+
+        // Exact boundary (equal to now): not strictly in the future -> not timed out.
+        let exact = member_with(Some("2026-11-24T12:00:00Z"), vec![]);
+        assert!(!is_timed_out_at(Some(&exact), now));
+
+        // Future timestamp: still timed out -> READ_ONLY in both base and channel.
+        let future = member_with(Some("2026-11-24T12:00:01Z"), vec![]);
+        assert!(is_timed_out_at(Some(&future), now));
+        assert_eq!(base_perms_at(&g, "u", Some(&future), now), p::READ_ONLY);
+        assert_eq!(channel_perms_at(&g, "u", Some(&future), &ch, None, now), p::READ_ONLY);
+
+        // None, empty string, and unparseable text count as not timed out.
+        for v in [None, Some(""), Some("not-a-timestamp"), Some("9999")] {
+            let m = member_with(v, vec![]);
+            assert!(!is_timed_out_at(Some(&m), now), "{v:?}");
+            assert_eq!(base_perms_at(&g, "u", Some(&m), now), full, "{v:?}");
+        }
+        assert!(!is_timed_out_at(None, now));
+
+        // +02:00 offset: 13:59:59+02:00 is 11:59:59Z (past); 14:00:01+02:00 is 12:00:01Z (future).
+        assert!(!is_timed_out_at(Some(&member_with(Some("2026-11-24T13:59:59+02:00"), vec![])), now));
+        assert!(is_timed_out_at(Some(&member_with(Some("2026-11-24T14:00:01+02:00"), vec![])), now));
+
+        // Fractional seconds: 11:59:59.999Z (past) vs 12:00:00.001Z (future).
+        assert!(!is_timed_out_at(Some(&member_with(Some("2026-11-24T11:59:59.999Z"), vec![])), now));
+        assert!(is_timed_out_at(Some(&member_with(Some("2026-11-24T12:00:00.001Z"), vec![])), now));
+
+        // Administrator is unaffected even with a future timeout.
+        let admin = member_with(Some("2026-11-24T13:00:00Z"), vec!["admin"]);
+        assert_eq!(base_perms_at(&g, "a", Some(&admin), now), p::ALL);
+        assert_eq!(channel_perms_at(&g, "a", Some(&admin), &ch, None, now), p::ALL);
     }
 }

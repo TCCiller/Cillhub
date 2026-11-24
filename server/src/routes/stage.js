@@ -1,6 +1,6 @@
 import { snowflake } from '../snowflake.js';
 import { get, memberIds } from '../db.js';
-import { HttpError, str, int, bool, snowflakeField, notFound, missingPermissions } from '../errors.js';
+import { HttpError, str, int, bool, isoTime, snowflakeField, notFound, missingPermissions } from '../errors.js';
 import { P, has, need, channelPerms, requireAbove, viewersOf } from '../permissions.js';
 import { sendToUsers, guildParts } from '../gateway.js';
 import { audit, A, diff } from '../audit.js';
@@ -100,9 +100,10 @@ function stateOf(guildId, userId) {
 function rtsField(body) {
   const v = body.request_to_speak_timestamp;
   if (v === null) return null;
-  const t = Date.parse(v);
-  if (typeof v !== 'string' || Number.isNaN(t)) throw new HttpError(400, 50035, 'Invalid Form Body');
-  return new Date(Math.max(t, Date.now())).toISOString();
+  const iso = isoTime(v);
+  if (!iso) throw new HttpError(400, 50035, 'Invalid Form Body');
+  const now = new Date().toISOString();
+  return iso > now ? iso : now;
 }
 
 // PATCH /guilds/:id/voice-states/@me: suppress yourself any time, unsuppress with MUTE_MEMBERS, raise or lower your hand

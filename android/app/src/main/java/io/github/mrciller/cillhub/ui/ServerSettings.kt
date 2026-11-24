@@ -89,13 +89,12 @@ import io.github.mrciller.cillhub.data.Sel
 import io.github.mrciller.cillhub.data.Session
 import io.github.mrciller.cillhub.data.State
 import io.github.mrciller.cillhub.data.User
-import io.github.mrciller.cillhub.data.json
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
 /** Permissions in the groups the role and overwrite editors show. */
@@ -283,7 +282,7 @@ private fun Roles(state: State, g: Guild, act: (suspend () -> Unit) -> Unit, edi
         item {
             FilledTonalButton({
                 act {
-                    val r = json.parseToJsonElement(Session.rest.request("POST", "/guilds/${g.id}/roles", buildJsonObject { put("name", "new role") })).jsonObject
+                    val r = Session.rest.call<JsonObject>("POST", "/guilds/${g.id}/roles", buildJsonObject { put("name", "new role") })
                     (r["id"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.let(edit)
                 }
             }, Modifier.padding(16.dp), shape = MaterialTheme.shapes.small) { Ic(R.drawable.ms_add, null, Modifier.size(18.dp)); Text(s(R.string.create_role).uppercase(), Modifier.padding(start = 8.dp)) }

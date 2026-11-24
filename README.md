@@ -24,7 +24,7 @@ Cillhub is a chat platform you can host yourself: servers with text channels, vo
 - End-to-end encrypted direct messages and group DMs in the web, desktop and Android apps. Each device trusts a contact's key the first time it sees it and warns when it changes; compare the security code with the other person to make sure it is the right key. Only DMs are encrypted, not server channels, and the web client comes from the server you use, so you trust that server's code.
 - Markdown, code blocks, spoilers, mentions, replies, reactions and pins
 - File and image uploads, link previews, message search
-- Custom emoji and stickers, a GIF picker with favourites
+- Custom emoji (a server can limit an emoji to certain roles), stickers and a soundboard; a GIF picker with favourites
 - Polls and scheduled events
 - English and German interface
 
@@ -105,8 +105,10 @@ Voice for local testing: add `VOICE_BACKEND=cillvoice CILLVOICE_UDP_PORT=50270 C
 
 ```sh
 cd server && npm test                                  # server unit and API tests
-cd client && npm run build                             # typecheck and build
+cd client && npm test && npm run build                 # client unit tests, typecheck and build
+cd rust-client && cargo test                           # Rust client library
 cd desktop-rust && cargo test && npm ci && npm run build   # Linux needs webkit2gtk-4.1, libayatana-appindicator3
+node --test selfhost/test/*.test.mjs                   # updater sidecar unit tests
 cd android && ./gradlew testDebugUnitTest              # Android unit tests
 NODE_PATH=<dir with playwright> npm run e2e:v8        # one of the browser suites in package.json; needs client/dist
 android/scripts/emulator-test.sh                       # instrumented Android tests against throwaway servers
@@ -119,6 +121,7 @@ android/scripts/emulator-test.sh                       # instrumented Android te
 | `server/` | Node 24, plain JavaScript (ES modules), `node:http`, `node:sqlite`, `ws`: REST API, gateway, uploads, voice, federation, modules, tests |
 | `client/` | Web client: Vite, React 19, TypeScript, plain CSS |
 | `desktop-rust/` | Desktop app: Rust + Tauri 2 around the web client |
+| `rust-client/` | Pure-Rust client library and protocol engine; the desktop app uses its settings code |
 | `android/` | Android app: Kotlin, Jetpack Compose |
 | `selfhost/` | `install.sh`, Compose file, Caddyfile, updater sidecar, release public key |
 | `scripts/` | End-to-end test suites and measurements |

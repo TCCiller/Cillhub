@@ -107,7 +107,7 @@ Section "Install" SecInstall
   WriteRegStr HKCU "Software\Classes\cillhub\DefaultIcon" "" "$INSTDIR\icon.ico,0"
   WriteRegStr HKCU "Software\Classes\cillhub\shell\open\command" "" '"$INSTDIR\${PRODUCT_EXE}" "%1"'
 
-  WriteRegStr HKCU "Software\Classes\cillcord" "" "URL:Cillcord Protocol"
+  WriteRegStr HKCU "Software\Classes\cillcord" "" "URL:Cillhub Protocol"
   WriteRegStr HKCU "Software\Classes\cillcord" "URL Protocol" ""
   WriteRegStr HKCU "Software\Classes\cillcord\DefaultIcon" "" "$INSTDIR\icon.ico,0"
   WriteRegStr HKCU "Software\Classes\cillcord\shell\open\command" "" '"$INSTDIR\${PRODUCT_EXE}" "%1"'

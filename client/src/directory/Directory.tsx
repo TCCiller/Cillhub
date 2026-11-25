@@ -87,7 +87,7 @@ function Card({ g, cats }: { g: Listing; cats: Category[] }) {
     done.catch(toastError).finally(() => setBusy(false))
   }
   const flag = () => void askText({ title: t('Report {name}', { name: g.name }), label: t('What is wrong with this listing?'), confirm: t('Report') })
-    .then((reason) => void (reason?.trim() && report(g.id, reason.trim()).then(() => toast(t('Thanks. The hub admins will review this server.')), toastError)))
+    .then((reason) => void (reason?.trim() && report(g.id, reason.trim(), g.node?.node_id).then(() => toast(t('Thanks. The hub admins will review this server.')), toastError)))
   const cat = cats.find((c) => c.id === g.primary_category_id)
   return (
     <li className="dir-card">

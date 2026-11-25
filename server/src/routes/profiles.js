@@ -11,12 +11,16 @@ const mutualFriends = (a, b) => all(`SELECT x.other_id AS id FROM relationships 
                                      WHERE x.user_id = ? AND y.user_id = ? AND x.type = 1 AND y.type = 1`, a, b);
 
 // visible for yourself, bots, friends, people sharing a guild or with an outgoing request to you (docs)
+function viewable(user, u, guilds) {
+  const pending = get('SELECT 1 FROM relationships WHERE user_id = ? AND other_id = ? AND type = 4', u.id, user.id);
+  if (u.id !== user.id && !u.bot && !guilds.length && !isFriend(user.id, u.id) && !pending) throw missingAccess();
+}
+
 function profile({ params, query, user }) {
   const u = userById(params.id === '@me' ? user.id : params.id);
   if (!u) throw notFound(10013, 'User');
   const guilds = mutualGuilds(user.id, u.id);
-  const pending = get('SELECT 1 FROM relationships WHERE user_id = ? AND other_id = ? AND type = 4', u.id, user.id);
-  if (u.id !== user.id && !u.bot && !guilds.length && !isFriend(user.id, u.id) && !pending) throw missingAccess();
+  viewable(user, u, guilds);
   const guildId = idParam(query, 'guild_id');
   const blocked = hasBlocked(u.id, user.id); // fields go missing for whoever is blocked by the profile's owner (docs)
   const c = json(u.customization, {});
@@ -62,7 +66,8 @@ function getMutualFriends({ params, user }) {
   const targetId = params.id === '@me' ? user.id : params.id;
   const target = userById(targetId);
   if (!target) throw notFound(10013, 'User');
-  if (target.id === user.id || target.bot) return [];
+  viewable(user, target, mutualGuilds(user.id, target.id));
+  if (target.id === user.id || target.bot || hasBlocked(target.id, user.id)) return [];
   return mutualFriends(user.id, target.id).map(f => userObj(userById(f.id))).filter(Boolean);
 }
 
@@ -70,8 +75,9 @@ function getMutualGuilds({ params, user }) {
   const targetId = params.id === '@me' ? user.id : params.id;
   const target = userById(targetId);
   if (!target) throw notFound(10013, 'User');
-  if (target.id === user.id) return [];
   const list = mutualGuilds(user.id, target.id);
+  viewable(user, target, list);
+  if (target.id === user.id || hasBlocked(target.id, user.id)) return [];
   return list.map(g => {
     const guild = get('SELECT id, name, icon FROM guilds WHERE id = ?', g.id);
     return guild ? { id: guild.id, name: guild.name, icon: guild.icon, nick: g.nick } : null;

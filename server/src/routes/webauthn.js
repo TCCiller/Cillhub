@@ -218,7 +218,10 @@ function listCredentials(ctx) {
   return all('SELECT id, nickname, created_at, last_used_at FROM webauthn_credentials WHERE user_id = ? ORDER BY created_at DESC', ctx.user.id);
 }
 
-function deleteCredential(ctx) {
+// removing a passkey needs the same proof as adding one: the password and, with 2FA on, a code, before anything is looked up
+async function deleteCredential(ctx) {
+  if (!(await confirmPassword(ctx.body?.password, ctx.user, ctx.headers))) throw invalid('password', 'PASSWORD_DOES_NOT_MATCH', 'Password does not match.');
+  requireMfa(ctx);
   const row = get('SELECT 1 FROM webauthn_credentials WHERE id = ? AND user_id = ?', ctx.params.id, ctx.user.id);
   if (!row) throw notFound(10013, 'WebAuthn credential');
   run('DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?', ctx.params.id, ctx.user.id);

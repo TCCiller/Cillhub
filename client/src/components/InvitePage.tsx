@@ -31,7 +31,7 @@ export function InvitePage({ code }: { code: string }) {
     if (!token) return navigate(`/login?next=${encodeURIComponent(location.pathname)}`)
     if (!loaded || loaded.code !== code) return
     setBusy(true)
-    joinInvite(loaded.code, loaded.invite.channel.id).catch((e: Error) => (setError(e.message), setBusy(false)))
+    joinInvite(loaded.code, loaded.invite.channel?.id).catch((e: Error) => (setError(e.message), setBusy(false)))
   }
 
   return (

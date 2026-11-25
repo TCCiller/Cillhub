@@ -1,7 +1,7 @@
 // POST /interactions (user docs), the bot's callback, and the interaction webhook routes (official docs)
 import { get, json, isMember, userById, userObj, memberRow, memberObj, roleObj, channelObj } from '../db.js';
-import { HttpError, invalid, notFound, missingAccess, snowflakeField } from '../errors.js';
-import { P, need, has, channelPerms } from '../permissions.js';
+import { HttpError, invalid, notFound, missingAccess, missingPermissions, snowflakeField } from '../errors.js';
+import { P, need, has, channelPerms, isRestricted } from '../permissions.js';
 import { messageObj } from '../message.js';
 import { readPayload } from '../compose.js';
 import { findComponent, isSelect } from '../components.js';
@@ -183,6 +183,8 @@ async function create(ctx) {
   if (body.guild_id != null && String(body.guild_id) !== String(ch.guild_id)) throw bad('guild_id', 'Does not match the channel.');
   if (ch.guild_id ? !isMember(ch.guild_id, app.id) : !get('SELECT 1 FROM dm_recipients WHERE channel_id = ? AND user_id = ?', ch.id, app.id) && body.type !== 3 && body.type !== 5) throw missingAccess();
   if (ch.guild_id && (body.type === 2 || body.type === 4)) need(ch.perms, P.USE_APPLICATION_COMMANDS);
+  // timed-out and pending members may not act through components and modals either
+  if (ch.guild_id && isRestricted(ch.guild_id, user.id)) throw missingPermissions();
   const nonce = typeof body.nonce === 'string' ? body.nonce.slice(0, 64) : undefined;
   const sessionId = typeof body.session_id === 'string' ? body.session_id : undefined;
   if (files.length && ch.guild_id) need(ch.perms, P.ATTACH_FILES);

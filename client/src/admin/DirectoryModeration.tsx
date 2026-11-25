@@ -15,9 +15,9 @@ export function DirectoryModeration() {
   const [filter, setFilter] = useState<(typeof FILTERS)[number][0]>('reported')
   const { data, error, reload } = useLoad(() => A.listDirectory(query, filter), [query, filter])
   const hide = (e: A.DirectoryEntry) => void askReasons(t('Hide {name} from the directory?', { name: e.guild.name }), t('Hide'))
-    .then((why) => void (why && A.setListingHidden(e.guild.id, true, why).then(() => (toast(t('Hidden from the directory.')), void reload()), toastError)))
-  const show = (e: A.DirectoryEntry) => void A.setListingHidden(e.guild.id, false).then(() => (toast(t('Listed again.')), void reload()), toastError)
-  const dismiss = (e: A.DirectoryEntry) => void A.dismissListingReports(e.guild.id).then(() => (toast(t('Reports dismissed.')), void reload()), toastError)
+    .then((why) => void (why && A.setListingHidden(e.guild.id, true, why, e.guild.node?.node_id).then(() => (toast(t('Hidden from the directory.')), void reload()), toastError)))
+  const show = (e: A.DirectoryEntry) => void A.setListingHidden(e.guild.id, false, undefined, e.guild.node?.node_id).then(() => (toast(t('Listed again.')), void reload()), toastError)
+  const dismiss = (e: A.DirectoryEntry) => void A.dismissListingReports(e.guild.id, e.guild.node?.node_id).then(() => (toast(t('Reports dismissed.')), void reload()), toastError)
   return (
     <>
       <div className="admin-tabs" role="group" aria-label={t('Filter')}>

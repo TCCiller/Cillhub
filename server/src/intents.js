@@ -1,4 +1,5 @@
 // Gateway intents (the documented bits) and what bot sessions may receive
+import { get } from './db.js';
 export const I = {
   GUILDS: 1 << 0, GUILD_MEMBERS: 1 << 1, GUILD_MODERATION: 1 << 2, GUILD_EXPRESSIONS: 1 << 3, GUILD_INTEGRATIONS: 1 << 4,
   GUILD_WEBHOOKS: 1 << 5, GUILD_INVITES: 1 << 6, GUILD_VOICE_STATES: 1 << 7, GUILD_PRESENCES: 1 << 8, GUILD_MESSAGES: 1 << 9,
@@ -67,8 +68,23 @@ export function wants(intents, t, d, botId) {
 }
 
 // MESSAGE_CONTENT rules: without the intent a bot sees content only in its own messages, DMs and messages mentioning it
+export const readable = (m, botId) => !m?.guild_id || m.author?.id === botId || !!m.mentions?.some(u => u.id === botId);
+
+// a forwarded copy is as readable as the message it was taken from; in a DM, what someone else forwards to the bot was shared with it
+function readableSource(m, botId) {
+  if (!m.guild_id && m.author?.id !== botId) return true;
+  const ref = m.message_reference;
+  if (!ref?.guild_id) return true;
+  const src = get('SELECT author_id, webhook_id, application_id, content FROM messages WHERE id = ?', ref.message_id);
+  return !!src && ((src.author_id === botId && (!src.webhook_id || !!src.application_id)) || src.content.includes(`<@${botId}>`) || src.content.includes(`<@!${botId}>`));
+}
+
+// a replied-to message and a forwarded copy follow the same rule as the message that carries them, in servers and DMs
 export function redact(m, botId) {
-  if (!m?.guild_id || m.author?.id === botId || m.mentions?.some(u => u.id === botId)) return m;
+  if (!m) return m;
+  const ref = m.referenced_message ? { referenced_message: redact(m.referenced_message, botId) } : {};
+  const snaps = m.message_snapshots && !readableSource(m, botId) ? { message_snapshots: [] } : {};
+  if (readable(m, botId)) return (!ref.referenced_message || ref.referenced_message === m.referenced_message) && !snaps.message_snapshots ? m : { ...m, ...ref, ...snaps };
   const { poll, ...rest } = m;
-  return { ...rest, content: '', embeds: [], attachments: [], components: [], ...(m.message_snapshots && { message_snapshots: [] }) };
+  return { ...rest, content: '', embeds: [], attachments: [], components: [], ...(m.message_snapshots && { message_snapshots: [] }), ...ref };
 }

@@ -353,3 +353,160 @@ test('ATTACHMENT options: multipart Create Interaction, resolved.attachments wit
   assert.equal((await srv.form('POST', `/interactions/${j.id}/${j.token}/callback`, null, { type: 5 }, [['files[0]', 'x.png', png(), 'image/png']])).status, 400);
   gw.ws.close();
 });
+
+test('a bot without message content gets no media-tab or mentions= hit for messages it cannot read', async () => {
+  const cat = await srv.register('cat');
+  assert.equal((await api('POST', `/invites/${g.invite.code}`, cat.token)).status, 200);
+  const ch = `/channels/${g.general.id}`;
+  const say = (who, content) => api('POST', `${ch}/messages`, who, { content });
+  await say(bob.token, 'plain https://hidden.example/a');
+  await srv.form('POST', `${ch}/messages`, alice.token, { content: 'pic' }, [['files[0]', 'x.png', png(), 'image/png']]);
+  await srv.form('POST', `${ch}/messages`, alice.token, { content: 'doc' }, [['files[0]', 'x.txt', Buffer.from('hi'), 'text/plain']]);
+  await say(alice.token, `ping <@${cat.id}> https://pinged.example/b`);
+  const gone = await say(alice.token, `left <@${cat.id}>`); // cat leaves below: the mentions array no longer names them
+  assert.equal(gone.status, 201);
+  assert.equal((await say(bob.token, `hey <@${app.id}> https://mine.example/c`)).status, 201);
+  await say(bot(app.bot.token), 'own https://own.example/d');
+  assert.equal((await api('DELETE', `/users/@me/guilds/${g.guild.id}`, cat.token)).status, 204);
+  const media = async (who, tab) => (await api('GET', `${ch}/media?tab=${tab}`, who)).body.messages.map(m => m.id);
+  const hits = async (who, q) => (await api('GET', `/guilds/${g.guild.id}/messages/search?${q}`, who)).body;
+  const quiet = bot(app.bot.token);
+  await api('PATCH', `/applications/${app.id}`, alice.token, { flags: 0 });
+  assert.equal((await media(quiet, 'links')).length, 2, 'only the bot\'s own and the mentioning message'); // own, mentioning it
+  assert.deepEqual([await media(quiet, 'media'), await media(quiet, 'files')], [[], []]);
+  const left = await hits(quiet, `mentions=${cat.id}`);
+  assert.deepEqual([left.total_results, left.messages.length], [0, 0]);
+  assert.equal((await hits(quiet, `mentions=${app.id}`)).total_results, (await hits(alice.token, `mentions=${app.id}`)).total_results, 'its own mentions stay searchable');
+  const total = async who => (await hits(who, `mentions=${cat.id}`)).total_results;
+  const allLinks = (await media(alice.token, 'links')).length;
+  assert.equal(allLinks, 4);
+  assert.equal(await total(alice.token), 2);
+  assert.equal((await hits(quiet, 'mention_everyone=false')).total_results, (await hits(alice.token, 'mention_everyone=false')).total_results, 'the flag is in the redacted object');
+  await api('PATCH', `/applications/${app.id}`, alice.token, { flags: 1 << 19 });
+  assert.deepEqual([(await media(quiet, 'links')).length, (await media(quiet, 'media')).length, (await media(quiet, 'files')).length, await total(quiet)], [4, 1, 1, 2]);
+});
+
+test('a bot without message content reads no text through replies, forwards, edits, crosspost responses, poll voters or mentions= of a leaver', async () => {
+  const dan = await srv.register('dan');
+  assert.equal((await api('POST', `/invites/${g.invite.code}`, dan.token)).status, 200);
+  const ch = `/channels/${g.general.id}`;
+  const quiet = bot(app.bot.token);
+  const say = (who, body) => api('POST', `${ch}/messages`, who, body);
+  await api('PATCH', `/applications/${app.id}`, alice.token, { flags: 0 });
+  const role = (await api('POST', `/guilds/${g.guild.id}/roles`, alice.token, { name: 'mod', permissions: String(1 << 13) })).body;
+  assert.equal((await api('PUT', `/guilds/${g.guild.id}/members/${app.id}/roles/${role.id}`, alice.token)).status, 204);
+  const secret = (await say(bob.token, { content: 'secret text' })).body;
+  const mine = (await say(bob.token, { content: `hi <@${app.id}>` })).body;
+  const own = (await say(quiet, { content: 'own words' })).body;
+  const poll = (await say(bob.token, { poll: { question: { text: 'Pizza?' }, answers: [{ poll_media: { text: 'Yes' } }], duration: 1 } })).body;
+  assert.equal((await api('PUT', `${ch}/polls/${poll.id}/answers/@me`, bob.token, { answer_ids: [1] })).status, 204);
+  // a leaver is named in a hidden message, in a message mentioning the bot and in the bot's own
+  await say(alice.token, { content: `hidden <@${dan.id}>` });
+  await say(alice.token, { content: `to bot <@${app.id}> <@${dan.id}>` });
+  await say(quiet, { content: `own <@${dan.id}>` });
+  assert.equal((await api('DELETE', `/users/@me/guilds/${g.guild.id}`, dan.token)).status, 204);
+  const hits = async who => (await api('GET', `/guilds/${g.guild.id}/messages/search?mentions=${dan.id}`, who)).body.messages.map(([m]) => m.content);
+  assert.deepEqual((await hits(quiet)).sort(), [`own <@${dan.id}>`, `to bot <@${app.id}> <@${dan.id}>`]);
+  assert.equal((await hits(alice.token)).length, 3);
+
+  const gw = await botGateway({ intents: I.GUILDS | I.GUILD_MESSAGES });
+  const reply = id => ({ content: 'r', message_reference: { message_id: id, channel_id: g.general.id } });
+  const toSecret = await say(quiet, reply(secret.id));
+  assert.equal(toSecret.status, 201);
+  assert.equal(toSecret.body.referenced_message.content, '', 'own reply response');
+  assert.equal(toSecret.body.message_reference.message_id, secret.id);
+  assert.equal((await gw.event('MESSAGE_CREATE', m => m.id === toSecret.body.id)).referenced_message.content, '', 'gateway');
+  assert.equal((await say(quiet, reply(mine.id))).body.referenced_message.content, `hi <@${app.id}>`, 'a message mentioning the bot stays readable');
+  assert.equal((await say(quiet, reply(own.id))).body.referenced_message.content, 'own words');
+  assert.equal((await api('GET', `${ch}/messages/${toSecret.body.id}`, quiet)).body.referenced_message.content, '');
+  assert.equal((await api('PUT', `${ch}/pins/${toSecret.body.id}`, alice.token)).status, 204);
+  assert.equal((await api('GET', `${ch}/pins`, quiet)).body[0].referenced_message.content, '');
+  const aliceReply = (await say(alice.token, reply(own.id))).body;
+  const listed = (await api('GET', `${ch}/messages?limit=20`, quiet)).body.find(m => m.id === aliceReply.id);
+  assert.deepEqual([listed.content, listed.referenced_message.content], ['', 'own words']);
+  const loud = (await api('GET', `${ch}/messages/${toSecret.body.id}`, alice.token)).body;
+  assert.equal(loud.referenced_message.content, 'secret text', 'a normal user is unchanged');
+
+  // forwards: a copy of a message it cannot read is blank, one it may read is not
+  const fwd = id => say(quiet, { message_reference: { type: 1, message_id: id, channel_id: g.general.id } });
+  const f1 = await fwd(secret.id);
+  assert.equal(f1.status, 201);
+  assert.deepEqual(f1.body.message_snapshots, []);
+  assert.deepEqual((await api('GET', `${ch}/messages/${f1.body.id}`, quiet)).body.message_snapshots, []);
+  assert.equal((await api('GET', `${ch}/messages/${f1.body.id}`, alice.token)).body.message_snapshots[0].message.content, 'secret text');
+  assert.equal((await fwd(mine.id)).body.message_snapshots[0].message.content, `hi <@${app.id}>`);
+
+  // edit and crosspost style responses: flags on a message the bot may manage but not read
+  const e = await api('PATCH', `${ch}/messages/${secret.id}`, quiet, { flags: 4 });
+  assert.equal(e.status, 200);
+  assert.equal(e.body.content, '');
+  assert.equal((await api('PATCH', `${ch}/messages/${own.id}`, quiet, { content: 'own edited' })).body.content, 'own edited');
+  assert.equal((await api('GET', `${ch}/messages/${own.id}/edits`, quiet)).body.edits[0].content, 'own words');
+  const news = (await api('POST', `/guilds/${g.guild.id}/channels`, alice.token, { name: 'news', type: 5 })).body;
+  const post = (await api('POST', `/channels/${news.id}/messages`, bob.token, { content: 'announced secret' })).body;
+  const cp = await api('POST', `/channels/${news.id}/messages/${post.id}/crosspost`, quiet);
+  assert.equal(cp.status, 200);
+  assert.equal(cp.body.content, '');
+
+  // poll voters follow the redacted poll
+  assert.deepEqual((await api('GET', `${ch}/polls/${poll.id}/answers/1`, quiet)).body.users, []);
+  assert.equal((await api('GET', `${ch}/polls/${poll.id}/answers/1`, alice.token)).body.users.length, 1);
+
+  await api('PATCH', `/applications/${app.id}`, alice.token, { flags: 1 << 19 });
+  assert.equal((await say(quiet, reply(secret.id))).body.referenced_message.content, 'secret text', 'the bot with the intent is unchanged');
+  assert.equal((await api('PATCH', `${ch}/messages/${secret.id}`, quiet, { flags: 0 })).body.content, 'secret text');
+  assert.equal((await api('GET', `${ch}/polls/${poll.id}/answers/1`, quiet)).body.users.length, 1);
+  assert.equal((await hits(quiet)).length, 3);
+  gw.ws.close();
+});
+
+test('a bot without message content reads no server text through forwards into DMs, replies to them or forward chains', async () => {
+  const ch = `/channels/${g.general.id}`;
+  const quiet = bot(app.bot.token);
+  await api('PATCH', `/applications/${app.id}`, alice.token, { flags: 0 });
+  const eve = await srv.register('eve');
+  assert.equal((await api('POST', `/invites/${g.invite.code}`, eve.token)).status, 200);
+  const say = (who, channel, body) => api('POST', `/channels/${channel}/messages`, who, body);
+  const fwd = (who, to, from, id) => say(who, to, { message_reference: { type: 1, message_id: id, channel_id: from } });
+  const secret = (await say(eve.token, g.general.id, { content: 'chain secret' })).body;
+  const mine = (await say(eve.token, g.general.id, { content: `hi again <@${app.id}>` })).body;
+  const own = (await say(quiet, g.general.id, { content: 'own again' })).body;
+  const dm = (await api('POST', '/users/@me/channels', quiet, { recipient_id: alice.id })).body;
+  const gw = await botGateway({ intents: I.GUILDS | I.GUILD_MESSAGES | (1 << 12) });
+  const hidden = r => assert.ok(!JSON.stringify(r.body).includes('chain secret'), JSON.stringify(r.body));
+  const snap = r => r.body.message_snapshots?.[0]?.message.content;
+
+  // server to DM: the 201, GET, the DM list, the gateway and a reply to it
+  const f1 = await fwd(quiet, dm.id, g.general.id, secret.id);
+  assert.equal(f1.status, 201);
+  assert.deepEqual(f1.body.message_snapshots, []);
+  assert.deepEqual((await api('GET', `/channels/${dm.id}/messages/${f1.body.id}`, quiet)).body.message_snapshots, []);
+  assert.deepEqual((await api('GET', `/channels/${dm.id}/messages`, quiet)).body.find(m => m.id === f1.body.id).message_snapshots, []);
+  assert.deepEqual((await gw.event('MESSAGE_CREATE', m => m.id === f1.body.id)).message_snapshots, []);
+  const rep = await say(quiet, dm.id, { content: 'r', message_reference: { message_id: f1.body.id, channel_id: dm.id } });
+  assert.equal(rep.status, 201);
+  hidden(rep);
+  hidden(await api('GET', `/channels/${dm.id}/messages/${rep.body.id}`, quiet));
+  assert.equal(snap(await api('GET', `/channels/${dm.id}/messages/${f1.body.id}`, alice.token)), 'chain secret', 'the DM partner sees the copy');
+
+  // chains: two and three hops, in the server and into the DM, never show more than the first hop
+  const h2 = await fwd(quiet, g.general.id, dm.id, f1.body.id);
+  const h3 = await fwd(quiet, dm.id, g.general.id, h2.body.id);
+  const h4 = await fwd(quiet, g.general.id, dm.id, h3.body.id);
+  for (const h of [h2, h3, h4]) {
+    assert.equal(h.status, 201);
+    hidden(h);
+    hidden(await api('GET', `/channels/${h.body.channel_id}/messages/${h.body.id}`, quiet));
+  }
+
+  // honest cases keep the text
+  assert.equal(snap(await fwd(quiet, dm.id, g.general.id, mine.id)), `hi again <@${app.id}>`, 'a message mentioning the bot');
+  assert.equal(snap(await fwd(quiet, dm.id, g.general.id, own.id)), 'own again', 'its own message');
+  const theirs = await fwd(alice.token, dm.id, g.general.id, secret.id);
+  assert.equal(snap(await api('GET', `/channels/${dm.id}/messages/${theirs.body.id}`, quiet)), 'chain secret', 'a user forwards to the bot in a DM');
+  assert.equal(snap({ body: await gw.event('MESSAGE_CREATE', m => m.id === theirs.body.id) }), 'chain secret');
+
+  await api('PATCH', `/applications/${app.id}`, alice.token, { flags: 1 << 19 });
+  assert.equal(snap(await api('GET', `/channels/${dm.id}/messages/${f1.body.id}`, quiet)), 'chain secret', 'the bot with the intent');
+  gw.ws.close();
+});

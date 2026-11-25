@@ -4,6 +4,7 @@ import { HttpError, invalid, notFound } from '../errors.js';
 import { sendToUsers } from '../gateway.js';
 import { publicKey, backupField, wrapField, wrappedUsers } from '../e2ee.js';
 import { loadChannel } from './channels.js';
+import { requireDmOpen } from './messages.js';
 
 function putKeys({ user, body }) {
   const pub = publicKey(body?.public_key);
@@ -71,6 +72,7 @@ const announce = (ch, ids) => {
 // a new channel key: epoch = current + 1 (else 409), wrapped for exactly the current members, who all have a key
 function putEpoch(ctx) {
   const ch = loadDm(ctx);
+  requireDmOpen(ch, ctx.user.id);
   const epoch = epochField(ctx.body);
   const stale = () => new HttpError(409, 50304, 'Someone renewed the key at the same time. Load it and try again.');
   if (epoch !== ch.e2ee_epoch + 1) throw stale();
@@ -89,6 +91,7 @@ function putEpoch(ctx) {
 // wraps of the current key for members who lack one (a new group member, a member after a key reset); never overwrites
 function putWraps(ctx) {
   const ch = loadDm(ctx);
+  requireDmOpen(ch, ctx.user.id);
   const epoch = epochField(ctx.body);
   if (epoch !== ch.e2ee_epoch) throw new HttpError(409, 50304, 'The conversation has a newer key. Load it and try again.');
   const ids = channelUserIds(ch);

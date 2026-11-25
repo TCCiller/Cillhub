@@ -6,7 +6,7 @@ import { sendToUsers, sendToSession } from './gateway.js';
 import { limit } from './ratelimit.js';
 import { setting } from './instance.js';
 import { settingsOf } from './userdata.js';
-import { blockedEither } from './routes/relationships.js';
+import { dmClosed } from './routes/relationships.js';
 
 // both backends export the same four names (endpoint, joinToken, removeParticipant, updateParticipant). New calls start on
 // the admin's choice (instance setting voice_backend, if that backend is configured), else on VOICE_BACKEND; a channel
@@ -181,7 +181,7 @@ function privateCall(session, d, cur) {
                   WHERE c.id = ? AND c.type IN (1, 3)`, userId, String(d.channel_id));
   if (!ch) return;
   // a call start posts a call message and rings, so a 1:1 call is refused where a DM message would be
-  if (ch.type === 1 && channelUserIds(ch).some(id => id !== userId && (blockedEither(userId, id) || userById(id)?.system))) return;
+  if (ch.type === 1 && channelUserIds(ch).some(id => id !== userId && (dmClosed(ch.id, userId, id) || userById(id)?.system))) return;
   const flags = { self_mute: !!d.self_mute, self_deaf: !!d.self_deaf, self_video: !!d.self_video, self_stream: !!d.self_stream };
   if (cur?.channel_id === ch.id && cur.session === session) {
     Object.assign(cur, flags);

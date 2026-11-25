@@ -1,7 +1,7 @@
 import { snowflake } from '../snowflake.js';
 import { get, all, run, tx, json, memberRow, memberObj, isMember, threadObj, threadMemberObj } from '../db.js';
 import { HttpError, str, int, bool, invalid, intParam, idParam, notFound, missingPermissions } from '../errors.js';
-import { P, has, need, channelPerms, viewersOf, isThread } from '../permissions.js';
+import { P, has, need, channelPerms, viewersOf, isThread, isRestricted } from '../permissions.js';
 import { sendToUsers, guildParts } from '../gateway.js';
 import { addJob, schedule } from '../timers.js';
 import { removeChannelFiles } from '../files.js';
@@ -154,6 +154,7 @@ function requireActive(t) {
 function join(ctx) {
   const t = loadThread(ctx);
   requireActive(t);
+  if (isRestricted(t.guild_id, ctx.user.id)) throw missingPermissions(); // leaving stays open
   addMember(t, ctx.user.id);
 }
 
@@ -175,10 +176,13 @@ function leave(ctx) {
   removeMember(t, ctx.user.id);
 }
 
+// the creator's own rights end while they are timed out or pending, like their other member actions
+const isCreator = (t, userId) => t.owner_id === userId && !isRestricted(t.guild_id, userId);
+
 function kick(ctx) {
   const t = loadThread(ctx);
   requireActive(t);
-  if (!isMod(t) && !(t.type === 12 && t.owner_id === ctx.user.id)) throw missingPermissions();
+  if (!isMod(t) && !(t.type === 12 && isCreator(t, ctx.user.id))) throw missingPermissions();
   removeMember(t, ctx.params.user_id);
 }
 
@@ -251,7 +255,7 @@ export { tagsField };
 export function patchThread(ctx, t) {
   const body = ctx.body ?? {};
   const mod = isMod(t);
-  const creator = t.owner_id === ctx.user.id;
+  const creator = isCreator(t, ctx.user.id);
   const next = {};
   if (body.archived === false && t.archived) {
     if (!mod && (t.locked || !has(t.perms, P.SEND_MESSAGES))) throw new HttpError(403, 160005, 'Thread is locked');

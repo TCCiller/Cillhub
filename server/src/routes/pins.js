@@ -4,7 +4,7 @@ import { P, need, viewersOf } from '../permissions.js';
 import { sendToUsers } from '../gateway.js';
 import { audit, A } from '../audit.js';
 import { loadChannel } from './channels.js';
-import { requireUnarchived, forViewer } from './messages.js';
+import { requireUnarchived, requireDmOpen, forViewer } from './messages.js';
 import { messageObj, getMessage, broadcastMessage } from '../message.js';
 
 function load({ params, user }) {
@@ -26,6 +26,7 @@ const auditPin = (ctx, ch, m, action) => ch.guild_id && audit(ctx, ch.guild_id, 
 function pin(ctx) {
   const [ch, m] = load(ctx);
   requireUnarchived(ch);
+  requireDmOpen(ch, ctx.user.id);
   if (m.pinned_at) return;
   if (get('SELECT COUNT(*) AS n FROM messages WHERE channel_id = ? AND pinned_at IS NOT NULL', ch.id).n >= 50) {
     throw new HttpError(400, 30003, 'Maximum number of pins reached (50)');
@@ -37,6 +38,7 @@ function pin(ctx) {
 
 function unpin(ctx) {
   const [ch, m] = load(ctx);
+  requireDmOpen(ch, ctx.user.id);
   if (!m.pinned_at) return;
   run('UPDATE messages SET pinned_at = NULL WHERE id = ?', m.id);
   announce(ch, m);

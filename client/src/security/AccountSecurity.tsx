@@ -169,6 +169,7 @@ function CodePrompt({ title, body, confirm, danger, password, onSubmit, onClose 
 
 function PasskeyManager({ mfa }: { mfa: boolean }) {
   const [asking, setAsking] = useState(false)
+  const [removing, setRemoving] = useState<string | null>(null)
   const [keys, setKeys] = useState<{ id: string; nickname: string; created_at: string; last_used_at: string | null }[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -239,8 +240,9 @@ function PasskeyManager({ mfa }: { mfa: boolean }) {
     }
   }
 
-  const remove = (id: string) => {
-    deletePasskey(id).then(reload, (err: Error) => setError(err.message))
+  const remove = (id: string, password: string, code?: string) => {
+    setError('')
+    deletePasskey(id, password, code).then(() => (setRemoving(null), reload()), (err: Error) => setError(err.message))
   }
 
   return (
@@ -254,10 +256,21 @@ function PasskeyManager({ mfa }: { mfa: boolean }) {
                 <strong>🔑 {k.nickname || 'Passkey'}</strong>
                 <div className="hint small">{t('Added on {date}', { date: new Date(k.created_at).toLocaleDateString() })}</div>
               </div>
-              <button type="button" className="danger-btn small-btn" onClick={() => remove(k.id)}>{t('Delete')}</button>
+              <button type="button" className="danger-btn small-btn" onClick={() => setRemoving(k.id)}>{t('Delete')}</button>
             </li>
           ))}
         </ul>
+      )}
+      {removing && (
+        <form onSubmit={(e) => { const f = form(e); remove(removing, f.password, f.code) }}>
+          <p className="hint">{t('Make sure it is really you: enter your password to continue.')}</p>
+          <Field label={t('Password')} name="password" type="password" required autoComplete="current-password" autoFocus />
+          {mfa && <Field label={t('Authentication or backup code')} name="code" required autoComplete="one-time-code" />}
+          <div className="row-buttons">
+            <button type="button" className="secondary" onClick={() => setRemoving(null)}>{t('Cancel')}</button>
+            <button className="danger-btn">{t('Delete')}</button>
+          </div>
+        </form>
       )}
       {asking ? (
         <form onSubmit={(e) => { const f = form(e); void registerPasskey(f.password, f.code) }}>

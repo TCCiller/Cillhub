@@ -618,9 +618,12 @@ export function apply(t: string, d: any) {
       return setState({ dmRecipientReads: { ...s.dmRecipientReads, [channel_id]: { ...cur, [user_id]: message_id } } })
     }
     case 'MESSAGE_ACK': {
-      if (d.user_id && d.user_id !== s.me?.id && d.channel_id && d.message_id) {
-        const cur = s.dmRecipientReads[d.channel_id] ?? {}
-        setState({ dmRecipientReads: { ...s.dmRecipientReads, [d.channel_id]: { ...cur, [d.user_id]: d.message_id } } })
+      if (d.user_id && d.user_id !== s.me?.id) {
+        if (d.channel_id && d.message_id) {
+          const cur = s.dmRecipientReads[d.channel_id] ?? {}
+          setState({ dmRecipientReads: { ...s.dmRecipientReads, [d.channel_id]: { ...cur, [d.user_id]: d.message_id } } })
+        }
+        return
       }
       return setState({ readStates: { ...s.readStates, [d.channel_id]: { id: d.channel_id, last_message_id: d.message_id, mention_count: 0 } } })
     }

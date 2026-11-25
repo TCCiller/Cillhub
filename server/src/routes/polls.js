@@ -5,6 +5,8 @@ import { sendToUsers } from '../gateway.js';
 import { addJob } from '../timers.js';
 import { messageObj, getMessage, getChannel, broadcastMessage, insertMessage } from '../message.js';
 import { loadChannel } from './channels.js';
+import { requireDmOpen, forViewer, seesContent } from './messages.js';
+import { readable } from '../intents.js';
 
 function loadPoll({ params, user }) {
   const ch = loadChannel(params.id, user);
@@ -52,6 +54,7 @@ addJob({
 function vote(ctx) {
   const [ch, m, p] = loadPoll(ctx);
   if (!p) throw notFound(10008, 'Message');
+  requireDmOpen(ch, ctx.user.id);
   if (ch.guild_id && isRestricted(ch.guild_id, ctx.user.id)) throw missingPermissions();
   if (p.finalized || p.expiry <= Date.now()) throw new HttpError(400, 520001, 'Poll expired');
   const allowedRoles = json(p.allowed_roles, []);
@@ -102,9 +105,9 @@ function vote(ctx) {
 }
 
 function voters(ctx) {
-  const [, m, p] = loadPoll(ctx);
+  const [ch, m, p] = loadPoll(ctx);
   if (!p) throw notFound(10008, 'Message');
-  if (p.anonymous) return { users: [] };
+  if (p.anonymous || (!seesContent(ctx.user) && !readable(messageObj(m, ch, ctx.user.id), ctx.user.id))) return { users: [] }; // like the poll itself, for a bot without message content
   const after = idParam(ctx.query, 'after');
   const limit = intParam(ctx.query, 'limit', 25, 1, 100);
   const users = all(`SELECT u.* FROM poll_votes v JOIN users u ON u.id = v.user_id WHERE v.message_id = ? AND v.answer_id = ?
@@ -117,8 +120,9 @@ function expire(ctx) {
   const [ch, m, p] = loadPoll(ctx);
   if (!p) throw new HttpError(400, 520006, 'Cannot expire a non-poll message');
   if (m.author_id !== ctx.user.id || m.webhook_id) throw missingPermissions();
+  requireDmOpen(ch, ctx.user.id);
   finalize(m.id);
-  return messageObj(getMessage(m.id), ch, ctx.user.id);
+  return forViewer(messageObj(getMessage(m.id), ch, ctx.user.id), ctx.user);
 }
 
 export default [

@@ -3,6 +3,7 @@ import { invalid } from '../errors.js';
 import { sendToUsers } from '../gateway.js';
 import { settingsOf } from '../userdata.js';
 import { loadChannel } from './channels.js';
+import { dmClosed } from './relationships.js';
 
 function ack({ params, user }) {
   const ch = loadChannel(params.id, user);
@@ -17,11 +18,9 @@ function ack({ params, user }) {
   const mid = get('SELECT last_message_id FROM read_states WHERE user_id = ? AND channel_id = ?', user.id, ch.id).last_message_id;
   sendToUsers([user.id], 'MESSAGE_ACK', { channel_id: ch.id, message_id: mid });
 
-  if ((ch.type === 1 || ch.type === 3) && settingsOf(user.id).privacy?.dm_read_receipts !== false) {
-    const recipients = channelUserIds(ch);
-    sendToUsers(recipients, 'CHANNEL_RECIPIENT_ACK', { channel_id: ch.id, user_id: user.id, message_id: mid });
-    const others = recipients.filter(id => id !== user.id);
-    if (others.length) sendToUsers(others, 'MESSAGE_ACK', { channel_id: ch.id, message_id: mid, user_id: user.id });
+  const blocked = ch.type === 1 && channelUserIds(ch).some(id => id !== user.id && dmClosed(ch.id, user.id, id));
+  if (!blocked && (ch.type === 1 || ch.type === 3) && settingsOf(user.id).privacy?.dm_read_receipts !== false) {
+    sendToUsers(channelUserIds(ch), 'CHANNEL_RECIPIENT_ACK', { channel_id: ch.id, user_id: user.id, message_id: mid });
   }
 
   return { token: null };

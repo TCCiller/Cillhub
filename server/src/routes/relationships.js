@@ -1,4 +1,4 @@
-import { get, all, run, tx, userById, userObj } from '../db.js';
+import { get, all, run, tx, isFriend, userById, userObj } from '../db.js';
 import { HttpError, str, notFound } from '../errors.js';
 import { sendToUsers, statusOf, presenceObj } from '../gateway.js';
 import { pushTo } from '../push.js';
@@ -12,6 +12,9 @@ const typeOf = (a, b) => get('SELECT type FROM relationships WHERE user_id = ? A
 // blocking is one-sided (type 2 in the blocker's view); most effects apply whichever side blocked
 export const hasBlocked = (a, b) => typeOf(a, b) === 2;
 export const blockedEither = (a, b) => hasBlocked(a, b) || hasBlocked(b, a);
+// a DM between a and b is closed to a: blocked either way, or b declined a's message request in this channel (friends are never stuck behind an old decline)
+export const dmClosed = (channelId, a, b) => blockedEither(a, b)
+  || (!!get("SELECT 1 FROM dm_requests WHERE channel_id = ? AND recipient_id = ? AND status = 'declined'", channelId, b) && !isFriend(a, b));
 
 const relEvent = (to, other, type) => sendToUsers([to], 'RELATIONSHIP_ADD', { id: other, type, user: userObj(userById(other)) });
 

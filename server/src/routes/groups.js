@@ -6,7 +6,7 @@ import { sendToUsers } from '../gateway.js';
 import { saveImage, removeImage, removeChannelFiles } from '../files.js';
 import { disconnectChannel, disconnectFromChannel } from '../voice.js';
 import { ring, stopRinging, activeCall } from '../calls.js';
-import { blockedEither } from './relationships.js';
+import { blockedEither, dmClosed } from './relationships.js';
 import { schedule } from '../timers.js';
 import { limit } from '../ratelimit.js';
 
@@ -127,7 +127,7 @@ export default [
   ['DELETE', '/channels/:id/recipients/:user_id', removeRecipient, { userOnly: true }],
   ['GET', '/channels/:id/call', ({ params, user }) => {
     const ch = loadPrivate(params.id, user);
-    return { ringable: channelUserIds(ch).some(id => id !== user.id && !blockedEither(user.id, id)) };
+    return { ringable: channelUserIds(ch).some(id => id !== user.id && !dmClosed(ch.id, user.id, id)) };
   }, { userOnly: true }],
   ['POST', '/channels/:id/call/ring', ({ params, body, user, headers }) => {
     const ch = loadPrivate(params.id, user);

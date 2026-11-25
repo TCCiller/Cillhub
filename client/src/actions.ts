@@ -903,8 +903,8 @@ export const getGuildAnalytics = (guildId: string, days = 30) =>
 // WebAuthn Passkeys (Contract v9 §9)
 export const listPasskeys = () =>
   api<{ id: string; nickname: string; created_at: string; last_used_at: string | null }[]>('/users/@me/webauthn/credentials')
-export const deletePasskey = (id: string) =>
-  api<{ ok: boolean }>(`/users/@me/webauthn/credentials/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export const deletePasskey = (id: string, password: string, code?: string) =>
+  api<{ ok: boolean }>(`/users/@me/webauthn/credentials/${encodeURIComponent(id)}`, { method: 'DELETE', body: { password, ...(code && { code: code.replace(/\s/g, '') }) } })
 
 // Bulk delete (Task 6.1)
 export async function bulkDeleteMessages(channelId: string, ids: string[]) {

@@ -5,6 +5,7 @@ import { authenticator } from './authenticator.js';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { startServer } from './helpers.js';
+import { totp } from './module-helpers.js';
 
 test('WebAuthn / Passkey: real signatures log in, forged assertions do not', async () => {
   const srv = await startServer();
@@ -43,7 +44,7 @@ test('WebAuthn / Passkey: real signatures log in, forged assertions do not', asy
     }
     const creds = (await srv.api('GET', '/users/@me/webauthn/credentials', alice.token)).body;
     assert.equal(creds.length, 3);
-    assert.equal((await srv.api('DELETE', `/users/@me/webauthn/credentials/${creds[0].id}`, alice.token)).status, 200);
+    assert.equal((await srv.api('DELETE', `/users/@me/webauthn/credentials/${creds[0].id}`, alice.token, { password: 'hunter2hunter2' })).status, 200);
     assert.equal((await srv.api('GET', '/users/@me/webauthn/credentials', alice.token)).body.length, 2);
     // a password change removes every passkey: one added with a stolen token must not outlive the reset
     assert.equal((await srv.api('PATCH', '/users/@me', alice.token, { password: 'hunter2hunter2', new_password: 'hunter3hunter3' })).status, 200);
@@ -99,6 +100,56 @@ test('the v9 E2EE draft shapes are refused', async () => {
     const alex = await srv.register('alex_e2ee');
     const put = await srv.api('PUT', '/users/@me/e2ee/keys', alex.token, { identity_key: 'alex-public-identity-key-base64', signed_prekey: 'x', signature: 'y' });
     assert.equal(put.status, 400);
+  } finally {
+    await srv.stop();
+  }
+});
+
+test('removing a passkey needs the password and, with 2FA on, a code', async () => {
+  const srv = await startServer();
+  try {
+    const alice = await srv.register('alice');
+    const mallory = await srv.register('mallory');
+    const add = async (user, type) => {
+      const auth = authenticator(type, srv.origin);
+      const opts = (await srv.api('POST', '/auth/webauthn/register/options', user.token, { password: 'hunter2hunter2' })).body;
+      assert.equal((await srv.api('POST', '/auth/webauthn/register/verify', user.token, { credential: auth.register(opts), nickname: 'Key' })).status, 200);
+    };
+    await add(alice, 'ec');
+    await add(mallory, 'ec');
+    const list = async user => (await srv.api('GET', '/users/@me/webauthn/credentials', user.token)).body;
+    const [mine] = await list(alice);
+    const [theirs] = await list(mallory);
+    const del = (id, body, user = alice) => srv.api('DELETE', `/users/@me/webauthn/credentials/${id}`, user.token, body);
+
+    for (const body of [undefined, {}, { password: 'wrongwrong' }]) {
+      const r = await del(mine.id, body);
+      assert.equal(r.status, 400, JSON.stringify(body));
+      assert.equal(r.body.errors.password._errors[0].code, 'PASSWORD_DOES_NOT_MATCH');
+      assert.equal((await list(alice)).length, 1, 'the passkey is still there');
+    }
+    // the step-up comes first: unknown and foreign ids look the same, and a wrong password does not tell them apart
+    assert.equal((await del('nope', { password: 'wrongwrong' })).status, 400);
+    assert.equal((await del(theirs.id, { password: 'wrongwrong' })).status, 400);
+    const unknown = await del('nope', { password: 'hunter2hunter2' });
+    const foreign = await del(theirs.id, { password: 'hunter2hunter2' });
+    assert.equal(unknown.status, 404);
+    assert.deepEqual([foreign.status, foreign.body], [404, unknown.body]);
+    assert.equal((await list(mallory)).length, 1);
+
+    // with 2FA on: no code is 401 / 60003 with a ticket, a backup code removes it
+    const on = await srv.api('POST', '/users/@me/mfa/totp/enable', alice.token, { password: 'hunter2hunter2', secret: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP', code: totp() });
+    assert.equal(on.status, 200, JSON.stringify(on.body));
+    const noCode = await del(mine.id, { password: 'hunter2hunter2' });
+    assert.equal(noCode.status, 401);
+    assert.equal(noCode.body.code, 60003);
+    assert.ok(noCode.body.mfa.ticket);
+    assert.equal((await list(alice)).length, 1);
+    assert.equal((await del(mine.id, { password: 'wrongwrong', code: on.body.backup_codes[0].code })).status, 400);
+    assert.equal((await list(alice)).length, 1);
+    const ok = await del(mine.id, { password: 'hunter2hunter2', code: on.body.backup_codes[0].code });
+    assert.deepEqual([ok.status, ok.body], [200, { ok: true }]);
+    assert.equal((await list(alice)).length, 0);
   } finally {
     await srv.stop();
   }

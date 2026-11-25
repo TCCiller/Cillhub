@@ -1,5 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { join } from 'node:path';
 import { startServer, guildWith } from './helpers.js';
 
 let srv, api, g, alice, bob, stranger;
@@ -88,4 +90,56 @@ test('analytics: records messages and joins, returns daily metrics to manager', 
   // Stranger cannot fetch analytics
   const forbidden = await api('GET', `/guilds/${guildId}/analytics`, stranger.token);
   assert.equal(forbidden.status, 403);
+});
+
+test('onboarding: a single_select prompt hands out one option, answering again swaps it, a timed-out member cannot answer', async () => {
+  const G = g.guild.id;
+  const role = async name => (await api('POST', `/guilds/${G}/roles`, alice.token, { name })).body.id;
+  const [a, b, c, shared, x, y] = [await role('a'), await role('b'), await role('c'), await role('shared'), await role('x'), await role('y')];
+  const put = await api('PUT', `/guilds/${G}/onboarding`, alice.token, {
+    enabled: true,
+    prompts: [
+      { title: 'Pick one', single_select: true, options: [{ title: 'A', role_ids: [a, shared] }, { title: 'B', role_ids: [b, shared] }, { title: 'C', role_ids: [c] }] },
+      { title: 'Pick any', single_select: false, options: [{ title: 'X', role_ids: [x] }, { title: 'Y', role_ids: [y] }] },
+    ],
+  });
+  assert.equal(put.status, 200);
+  const [[A, B, C], [X, Y]] = put.body.prompts.map(p => p.options.map(o => o.id));
+  const signUp = async name => { const u = await srv.register(name); assert.equal((await api('POST', `/invites/${g.invite.code}`, u.token)).status, 200); return u; };
+  const roles = async u => (await api('GET', `/guilds/${G}/members/${u.id}`, alice.token)).body.roles.sort();
+  const answer = (u, ids) => api('POST', `/guilds/${G}/onboarding/respond`, u.token, { option_ids: ids });
+  const sorted = (...ids) => ids.sort();
+
+  const cleo = await signUp('cleo');
+  const two = await answer(cleo, [A, B]);
+  assert.equal(two.status, 400);
+  assert.equal(two.body.errors.option_ids._errors.length, 1);
+  assert.deepEqual(await roles(cleo), [], 'nothing assigned');
+  assert.equal((await answer(cleo, [A, X, Y])).status, 200);
+  assert.deepEqual(await roles(cleo), sorted(a, shared, x, y), 'a multi-select prompt still adds both');
+  const swap = await answer(cleo, [B]);
+  assert.equal(swap.status, 200);
+  assert.deepEqual(swap.body.assigned_roles.sort(), sorted(b, shared));
+  assert.deepEqual(await roles(cleo), sorted(b, shared, x, y), 'the second answer replaces the first; the shared role and other prompts stay');
+  assert.equal((await answer(cleo, [B])).status, 200);
+  assert.deepEqual(await roles(cleo), sorted(b, shared, x, y), 'the same answer twice changes nothing');
+  assert.equal((await answer(cleo, [C, 'nope'])).status, 200);
+  assert.deepEqual(await roles(cleo), sorted(c, x, y), 'unknown option ids are ignored; the shared role goes with its options');
+  assert.equal((await answer(cleo, [X])).status, 200);
+  assert.deepEqual(await roles(cleo), sorted(c, x, y), 'an answer about another prompt leaves the single_select choice alone');
+
+  // a timed-out member may not answer; a pending one may
+  const dev = await signUp('dev');
+  const eli = await signUp('eli');
+  assert.equal((await api('PATCH', `/guilds/${G}/members/${dev.id}`, alice.token, { communication_disabled_until: new Date(Date.now() + 3_600_000).toISOString() })).status, 200);
+  const refused = await answer(dev, [A]);
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.code, 50013);
+  assert.deepEqual(await roles(dev), []);
+  const db = new DatabaseSync(join(srv.dataDir, 'cillcord.sqlite'));
+  try { db.prepare('UPDATE members SET pending = 1 WHERE guild_id = ? AND user_id = ?').run(G, eli.id); } finally { db.close(); }
+  assert.equal((await answer(eli, [A])).status, 200);
+  assert.deepEqual(await roles(eli), sorted(a, shared));
+  await api('PATCH', `/guilds/${G}/members/${dev.id}`, alice.token, { communication_disabled_until: null });
+  assert.equal((await answer(dev, [A])).status, 200, 'works again once the timeout is lifted');
 });

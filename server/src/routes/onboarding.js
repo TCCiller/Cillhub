@@ -1,7 +1,7 @@
 import { snowflake } from '../snowflake.js';
 import { get, run, tx, json, memberIds, memberRow, memberObj } from '../db.js';
-import { HttpError } from '../errors.js';
-import { P, need, requireAssignable } from '../permissions.js';
+import { HttpError, invalid, missingPermissions } from '../errors.js';
+import { P, need, isTimedOut, requireAssignable } from '../permissions.js';
 import { sendToUsers, visibility, syncVisibility } from '../gateway.js';
 import { loadGuild } from './guilds.js';
 
@@ -63,25 +63,28 @@ function respondOnboarding(ctx) {
   const g = loadGuild(ctx.params.id, ctx.user);
   const row = get('SELECT * FROM guild_onboarding WHERE guild_id = ?', g.id);
   if (!row || !row.enabled) throw new HttpError(400, 0, 'Onboarding is not enabled for this server.');
+  if (isTimedOut(memberRow(g.id, ctx.user.id))) throw missingPermissions(); // a pending member may answer, a timed-out one may not hand themselves roles
 
   const body = ctx.body ?? {};
   const optionIds = new Set(Array.isArray(body.option_ids) ? body.option_ids.map(String) : []);
   const prompts = json(row.prompts, []);
 
+  const roleOf = rid => get('SELECT id FROM roles WHERE id = ? AND guild_id = ? AND managed = 0', rid, g.id)?.id;
   const rolesToAssign = new Set();
+  const rolesToRemove = new Set(); // what only the other options of an answered single_select prompt grant
   for (const prompt of prompts) {
-    for (const opt of prompt.options) {
-      if (optionIds.has(opt.id)) {
-        for (const rid of opt.role_ids) {
-          const role = get('SELECT id FROM roles WHERE id = ? AND guild_id = ? AND managed = 0', rid, g.id);
-          if (role) rolesToAssign.add(role.id);
-        }
-      }
+    const chosen = prompt.options.filter(opt => optionIds.has(opt.id));
+    if (prompt.single_select && chosen.length > 1) throw invalid('option_ids', 'BASE_TYPE_MAX_LENGTH', 'Choose at most one option per single-select prompt.');
+    for (const opt of chosen) opt.role_ids.map(roleOf).filter(Boolean).forEach(r => rolesToAssign.add(r));
+    if (prompt.single_select && chosen.length) {
+      for (const opt of prompt.options) if (!chosen.includes(opt)) opt.role_ids.map(roleOf).filter(Boolean).forEach(r => rolesToRemove.add(r));
     }
   }
+  for (const r of rolesToAssign) rolesToRemove.delete(r); // a role the answer itself grants stays
 
   const seen = visibility(g.id, [ctx.user.id]);
   tx(() => {
+    for (const roleId of rolesToRemove) run('DELETE FROM member_roles WHERE guild_id = ? AND user_id = ? AND role_id = ?', g.id, ctx.user.id, roleId);
     for (const roleId of rolesToAssign) {
       run('INSERT OR IGNORE INTO member_roles (guild_id, user_id, role_id) VALUES (?, ?, ?)', g.id, ctx.user.id, roleId);
     }

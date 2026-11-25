@@ -126,16 +126,20 @@ function joinRequest({ params, body, user }) {
 function patchVanity(ctx) {
   const g = loadGuild(ctx.params.id, ctx.user, P.MANAGE_GUILD);
   const raw = ctx.body?.code;
-  const code = raw === null || raw === '' ? null : raw;
-  if (code !== null && (typeof code !== 'string' || !/^[a-z0-9-]{3,32}$/.test(code))) throw invalid('code', 'BASE_TYPE_BAD_LENGTH', 'Codes are 3-32 characters of a-z, 0-9 and -.');
-  if (code && (get('SELECT 1 FROM guilds WHERE vanity_url_code = ? AND id != ?', code, g.id) || get('SELECT 1 FROM invites WHERE code = ?', code))) {
-    throw new HttpError(400, 50020, 'Invite code is either invalid or taken');
+  const code = raw == null || raw === '' ? null : String(raw).trim().toLowerCase();
+  if (code !== null) {
+    if (!/^[a-z0-9_-]{2,32}$/.test(code)) throw invalid('code', 'INVALID_VANITY_CODE', 'Must be 2-32 alphanumeric or dash characters');
+    // findInvite resolves either column; an old lower-case invite link, even expired, must not start leading to another server
+    if (get('SELECT 1 FROM guilds WHERE (vanity_url_code = ? OR vanity_code = ?) AND id != ?', code, code, g.id) || get('SELECT 1 FROM invites WHERE code = ?', code)) {
+      throw new HttpError(400, 50020, 'Vanity URL already in use');
+    }
   }
-  run('UPDATE guilds SET vanity_url_code = ?, vanity_uses = CASE WHEN vanity_url_code IS ? THEN vanity_uses ELSE 0 END WHERE id = ?', code, code, g.id);
-  audit(ctx, g.id, A.GUILD_UPDATE, g.id, { changes: diff({ vanity_url_code: g.vanity_url_code }, { vanity_url_code: code }) });
+  const old = g.vanity_url_code ?? g.vanity_code ?? null;
+  run('UPDATE guilds SET vanity_url_code = ?, vanity_code = ?, vanity_uses = CASE WHEN ? IS ? THEN vanity_uses ELSE 0 END WHERE id = ?', code, code, old, code, g.id);
+  audit(ctx, g.id, A.GUILD_UPDATE, g.id, { changes: diff({ vanity_url_code: old }, { vanity_url_code: code }) });
   guildUpdate(g);
   const out = guildRow(g.id);
-  return { code: out.vanity_url_code, uses: out.vanity_uses };
+  return { code, uses: out.vanity_uses };
 }
 
 export default [
@@ -147,7 +151,7 @@ export default [
   ['POST', '/guilds/:id/members/@me/accept-rules', ({ params, user }) => accept(loadGuild(params.id, user).id, user)],
   ['GET', '/guilds/:id/vanity-url', ({ params, user }) => {
     const g = loadGuild(params.id, user, P.MANAGE_GUILD);
-    return { code: g.vanity_url_code, uses: g.vanity_uses };
+    return { code: g.vanity_url_code ?? g.vanity_code ?? null, uses: g.vanity_uses ?? 0 };
   }],
   ['PATCH', '/guilds/:id/vanity-url', patchVanity],
 ];

@@ -143,7 +143,16 @@ object Reducer {
             val e = json.decodeFromJsonElement<EmojiRef>(d["emoji"]!!)
             patchMessage(s, d.str("channel_id") ?: "", d.str("message_id") ?: "") { m -> m.copy(reactions = m.reactions.filter { it.emoji.key != e.key }) }
         }
-        "MESSAGE_ACK" -> ack(s, d.str("channel_id") ?: "", d.str("message_id"))
+        "MESSAGE_ACK" -> {
+            val cid = d.str("channel_id") ?: ""
+            val mid = d.str("message_id")
+            val uid = d.str("user_id")
+            if (isOwnMessageAck(uid, s.me?.id)) ack(s, cid, mid)
+            else if (cid.isNotEmpty() && !uid.isNullOrEmpty() && !mid.isNullOrEmpty()) {
+                val cur = s.dmRecipientReads[cid].orEmpty() + (uid to mid)
+                s.copy(dmRecipientReads = s.dmRecipientReads + (cid to cur))
+            } else s
+        }
         "CHANNEL_RECIPIENT_ACK" -> {
             val cid = d.str("channel_id") ?: return s
             val uid = d.str("user_id") ?: return s

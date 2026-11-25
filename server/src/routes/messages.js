@@ -1,14 +1,14 @@
 import { get, all, run, tx, json, channelUserIds, idTime } from '../db.js';
-import { blockedEither } from './relationships.js';
-import { I, privilegedAllowed, redact } from '../intents.js';
+import { dmClosed } from './relationships.js';
+import { I, privilegedAllowed, redact, readable } from '../intents.js';
 import { HttpError, str, int, invalid, intParam, idParam, notFound, missingPermissions } from '../errors.js';
-import { P, need, has, viewersOf, isThread, MESSAGEABLE } from '../permissions.js';
+import { P, need, has, viewersOf, isThread, isRestricted, MESSAGEABLE } from '../permissions.js';
 import { sendToUsers } from '../gateway.js';
 import { audit, A } from '../audit.js';
 import { moderateMessage } from '../automod.js';
 import { readPayload, prepare, send, checkSend, checkThreadOpen, markSent, filterEmoji } from '../compose.js';
 import {
-  F, messageObj, getMessage, getChannel, broadcastMessage, deleteMessages, countedMentions, unfurlLater, insertMessage, copyAttachments,
+  F, AUTHOR_IS_ID_SQL, messageObj, getMessage, getChannel, broadcastMessage, deleteMessages, countedMentions, unfurlLater, insertMessage, copyAttachments,
 } from '../message.js';
 import { removeAttachment } from '../files.js';
 import { loadChannel } from './channels.js';
@@ -18,6 +18,11 @@ import { PLACEHOLDER, isEncrypted, refused, envelopeField, checkWrapsCurrent } f
 // bots without the MESSAGE_CONTENT flag on their application read content only where the docs allow it
 export const seesContent = user => !user.bot
   || !!(privilegedAllowed(get('SELECT flags FROM applications WHERE id = ?', user.id)?.flags ?? 0) & I.MESSAGE_CONTENT);
+// where redact() lets a bot without message content read a guild message: its own, or one mentioning it (DMs pass redact anyway)
+export const botReadableSql = userId => ({
+  sql: `((m.author_id = ? AND ${AUTHOR_IS_ID_SQL}) OR m.content LIKE '%<@' || ? || '>%' OR m.content LIKE '%<@!' || ? || '>%')`,
+  args: [userId, userId, userId],
+});
 export const forViewer = (m, user) => (seesContent(user) ? m : redact(m, user.id));
 
 export function loadMessage({ params, user }) {
@@ -32,6 +37,11 @@ export const ownMessage = (m, userId) => m.author_id === userId && !m.webhook_id
 
 export function requireUnarchived(ch) {
   if (isThread(ch) && ch.archived) throw new HttpError(400, 50083, 'Thread is archived');
+}
+
+// a 1:1 DM is closed to writes once either side blocks the other, or the other side declined this user's message request (friends are never stuck behind an old decline)
+export function requireDmOpen(ch, userId) {
+  if (ch.type === 1 && channelUserIds(ch).some(id => id !== userId && dmClosed(ch.id, userId, id))) throw new HttpError(403, 50007, 'Cannot send messages to this user');
 }
 
 function list({ params, query, user }) {
@@ -59,9 +69,9 @@ async function create(ctx) {
   if (ch.type === 15) throw new HttpError(400, 40058, 'Cannot send a message in a forum channel');
   if (!MESSAGEABLE.includes(ch.type)) throw new HttpError(400, 50008, 'Cannot send messages in a non-text channel');
   checkSend(ch, ctx.user.id, ch.perms);
-  // nobody messages someone they blocked or who blocked them in a 1:1 DM
+  requireDmOpen(ch, ctx.user.id);
   // nobody messages the system account either (v6 announcements are one-way)
-  if (ch.type === 1 && channelUserIds(ch).some(id => id !== ctx.user.id && (blockedEither(ctx.user.id, id) || get('SELECT system FROM users WHERE id = ?', id)?.system))) {
+  if (ch.type === 1 && channelUserIds(ch).some(id => id !== ctx.user.id && get('SELECT system FROM users WHERE id = ?', id)?.system)) {
     throw new HttpError(403, 50007, 'Cannot send messages to this user');
   }
   const { body, files } = await readPayload(ctx);
@@ -83,7 +93,7 @@ async function create(ctx) {
   if (isThread(ch)) reopened(ch);
   mod?.execute(m.id);
   ctx.status = 201;
-  return { ...messageObj(m, ch, ctx.user.id), nonce: d.nonce };
+  return { ...forViewer(messageObj(m, ch, ctx.user.id), ctx.user), nonce: d.nonce };
 }
 
 function edit(ctx) {
@@ -92,6 +102,8 @@ function edit(ctx) {
   const own = ownMessage(m, ctx.user.id);
   if (body.flags === undefined && !own) throw missingPermissions();
   requireUnarchived(ch);
+  requireDmOpen(ch, ctx.user.id);
+  if (own && ch.guild_id && isRestricted(ch.guild_id, ctx.user.id)) throw missingPermissions(); // timed out or pending: no new text in front of others
   if (body.e2ee_envelope !== undefined || (isEncrypted(ch) && body.content !== undefined)) return editEncrypted(ctx, ch, m, own);
   let { flags, content } = m;
   if (body.flags !== undefined) {
@@ -128,7 +140,7 @@ function edit(ctx) {
   broadcastMessage(ch, 'MESSAGE_UPDATE', out);
   if (relink && !(flags & F.SUPPRESS_EMBEDS) && (m.webhook_id || has(ch.perms, P.EMBED_LINKS))) unfurlLater(out);
   mod?.execute(m.id);
-  return messageObj(out, ch, ctx.user.id);
+  return forViewer(messageObj(out, ch, ctx.user.id), ctx.user);
 }
 
 // encrypted DM: a new envelope replaces the old one, no edit history; plain text is never taken
@@ -148,7 +160,7 @@ function editEncrypted(ctx, ch, m, own) {
   run('DELETE FROM message_edits WHERE message_id = ?', m.id); // an older plain version would outlive the encrypted one
   const out = getMessage(m.id);
   broadcastMessage(ch, 'MESSAGE_UPDATE', out);
-  return messageObj(out, ch, ctx.user.id);
+  return forViewer(messageObj(out, ch, ctx.user.id), ctx.user);
 }
 
 function remove(ctx) {
@@ -191,7 +203,7 @@ async function crosspost(ctx) {
   }
   const out = getMessage(m.id);
   broadcastMessage(ch, 'MESSAGE_UPDATE', out);
-  return messageObj(out, ch, ctx.user.id);
+  return forViewer(messageObj(out, ch, ctx.user.id), ctx.user);
 }
 
 function bulkDelete(ctx) {
@@ -231,7 +243,7 @@ function getMessageEdits(ctx) {
   const [ch, m] = loadMessage(ctx);
   need(ch.perms, P.VIEW_CHANNEL | P.READ_MESSAGE_HISTORY);
   const obj = messageObj(m, ch, ctx.user.id);
-  const hidden = forViewer(obj, ctx.user) !== obj; // a bot without message content reads no old versions either
+  const hidden = !seesContent(ctx.user) && !readable(obj, ctx.user.id); // a bot without message content reads no old versions either
   const edits = all('SELECT previous_content AS content, edited_at FROM message_edits WHERE message_id = ? ORDER BY id ASC', m.id);
   return { edits: hidden ? edits.map(e => ({ ...e, content: '' })) : edits };
 }
@@ -259,13 +271,15 @@ function listChannelMedia(ctx) {
     )`;
   }
 
+  // the tabs reveal links and attachments, which a bot without message content cannot read in a guild
+  const own = ch.guild_id && !seesContent(ctx.user) ? botReadableSql(ctx.user.id) : { sql: '1', args: [] };
   const rows = all(`
     SELECT m.* FROM messages m
     WHERE m.channel_id = ? AND (? IS NULL OR CAST(m.id AS INTEGER) < CAST(? AS INTEGER))
-      AND m.e2ee_envelope IS NULL
+      AND m.e2ee_envelope IS NULL AND ${own.sql}
       ${whereClause}
     ORDER BY CAST(m.id AS INTEGER) DESC LIMIT ?
-  `, ch.id, before, before, limit);
+  `, ch.id, before, before, ...own.args, limit);
 
   return { messages: rows.map(r => forViewer(messageObj(r, ch, ctx.user.id), ctx.user)) };
 }

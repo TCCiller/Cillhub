@@ -3,7 +3,7 @@ import { get, all, run, json, channelUserIds } from './db.js';
 import { sendToUsers, sendToSession } from './gateway.js';
 import { statesIn, voiceStateObj, joinHooks, leaveHooks } from './voice.js';
 import { insertMessage, broadcastMessage, getMessage, getChannel } from './message.js';
-import { blockedEither } from './routes/relationships.js';
+import { dmClosed } from './routes/relationships.js';
 import { pushTo } from './push.js';
 
 const calls = new Map(); // channel id -> { channel_id, message_id, ringing: Set }
@@ -55,7 +55,7 @@ export function ring(ch, caller, recipients) {
   if (!c) return;
   const inCall = new Set(statesIn(ch.id).map(v => v.user_id));
   const members = channelUserIds(ch);
-  const targets = (recipients ?? members).filter(id => members.includes(id) && id !== caller.id && !inCall.has(id) && !blockedEither(caller.id, id));
+  const targets = (recipients ?? members).filter(id => members.includes(id) && id !== caller.id && !inCall.has(id) && !dmClosed(ch.id, caller.id, id));
   const fresh = targets.filter(id => !c.ringing.has(id));
   targets.forEach(id => c.ringing.add(id));
   update(c);

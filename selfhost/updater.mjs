@@ -351,16 +351,17 @@ export function pruneBackups(root, keep, protect) {
 async function run(kind, target, fn) {
   save({ state: kind === 'update' ? 'updating' : 'rolling_back', action: kind, target_version: target, step: null,
     error: null, rolled_back: null, logs: null, started_at: new Date().toISOString(), finished_at: null });
+  const progress = { swapped: false }; // set where swap starts: from there the node may have changed and a backup exists
   try {
-    await fn();
+    await fn(progress);
     save({ state: 'done', step: null, finished_at: new Date().toISOString() });
   } catch (err) {
     console.error(`updater: ${kind} failed: ${err.message}`);
     save({ state: 'failed', step: null, error: err.message, rolled_back: err.rolled_back ?? false, logs: err.logs ?? null, finished_at: new Date().toISOString(),
-      ...(kind === 'update' && { skip_version: target }) }); // automatic updates leave this version alone
+      ...(kind === 'update' && progress.swapped && { skip_version: target }) }); // automatic updates leave a version alone once it was tried; a failed download or load changed nothing
   }
 }
-async function update(j) {
+async function update(j, progress) {
   step('downloading');
   const file = await download(j);
   step('loading the image');
@@ -368,6 +369,7 @@ async function update(j) {
   fs.rmSync(file);
   const image = await docker('GET', `/images/${enc(ref)}/json`);
   if (versionOf(image) !== j.version) throw new Error(`the image is version ${versionOf(image)}, expected ${j.version}`);
+  progress.swapped = true;
   const r = await swap(image.Id, `pre-${j.version}`, null);
   await tag(r.previous.image, 'previous');
   save({ previous: r.previous, rollback_snapshot: r.snapshot, backup: r.backup });
@@ -420,7 +422,7 @@ export async function handle(req, res) {
       if (auto === true && state.skip_version === j.version) return send(409, { error: `${j.version} failed or was rolled back before; update by hand` });
       if (cmp(j.version, cur) <= 0) return send(409, { error: `already on ${cur}, the hub offers ${j.version}` });
       if (j.min_upgrade_from && cmp(cur, j.min_upgrade_from) < 0) return send(422, { error: `update to ${j.min_upgrade_from} first` });
-      run('update', j.version, () => update(j));
+      run('update', j.version, (progress) => update(j, progress));
     } finally { locked = false; }
     return send(202, await status());
   }

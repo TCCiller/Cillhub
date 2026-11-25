@@ -3,6 +3,7 @@ package io.github.mrciller.cillhub
 import android.content.Context
 import android.util.Log
 import io.github.mrciller.cillhub.data.Session
+import io.github.mrciller.cillhub.data.isOwnMessageAck
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
@@ -60,7 +61,12 @@ object Hub {
             "RELATIONSHIP_REMOVE" -> blocked.remove(d.optString("id"))
             "GUILD_MEMBER_UPDATE" -> if (d.optJSONObject("user")?.optString("id") == meId) myRoles[d.optString("guild_id")] = d.optJSONArray("roles").strings().toSet()
             "MESSAGE_CREATE" -> onMessage(d)
-            "MESSAGE_ACK" -> Notifications.read(app, d.optString("channel_id"), d.optString("message_id").ifEmpty { null })
+            "MESSAGE_ACK" -> {
+                val ackUserId = if (d.isNull("user_id")) null else d.optString("user_id").ifEmpty { null }
+                if (isOwnMessageAck(ackUserId, meId)) {
+                    Notifications.read(app, d.optString("channel_id"), d.optString("message_id").ifEmpty { null })
+                }
+            }
             "CALL_CREATE", "CALL_UPDATE" -> onCall(d)
             "CALL_DELETE" -> Calls.remoteEnded(app, d.optString("channel_id"))
         }

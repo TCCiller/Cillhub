@@ -1,5 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { join } from 'node:path';
 import { startServer, guildWith, bits } from './helpers.js';
 
 let srv, api, g, alice, bob, carol;
@@ -230,4 +232,53 @@ test('welcome screen, vanity URL, guild features and settings', async () => {
   assert.equal((await api('PATCH', `/guilds/${g.guild.id}`, alice.token, { afk_timeout: 42 })).status, 400);
   assert.equal((await api('PATCH', `/guilds/${g.guild.id}`, alice.token, { afk_channel_id: g.general.id })).status, 400);
   assert.equal((await api('PATCH', `/guilds/${g.guild.id}`, carol.token, { features: [] })).status, 403, 'COMMUNITY needs ADMINISTRATOR');
+});
+
+test('vanity URL: Manage Server only, audited, announced, uses reset on change, both columns follow', async () => {
+  const G = g.guild.id;
+  const url = `/guilds/${G}/vanity-url`;
+  const col = () => { const d = new DatabaseSync(join(srv.dataDir, 'cillcord.sqlite'), { readOnly: true }); try { return { ...d.prepare('SELECT vanity_url_code AS a, vanity_code AS b FROM guilds WHERE id = ?').get(G) }; } finally { d.close(); } };
+  const set = code => api('PATCH', url, carol.token, { code });
+  const denied = await api('GET', url, bob.token);
+  assert.deepEqual([denied.status, denied.body.code], [403, 50013], 'a plain member does not read the code');
+  assert.equal((await api('PATCH', url, bob.token, { code: 'by-bob' })).status, 403);
+  assert.equal((await api('GET', url, carol.token)).status, 200);
+
+  const changed = await set('Vanity-Two');
+  assert.deepEqual(changed.body, { code: 'vanity-two', uses: 0 }, 'trimmed and lower-cased; a changed code starts at 0 uses');
+  assert.equal((await bob.gw.event('GUILD_UPDATE', d => d.id === G && d.vanity_url_code === 'vanity-two')).vanity_url_code, 'vanity-two');
+  const log = (await api('GET', `/guilds/${G}/audit-logs`, carol.token)).body.audit_log_entries;
+  const mine = log.flatMap(e => e.changes ?? []).filter(c => c.key === 'vanity_url_code' && c.new_value === 'vanity-two');
+  assert.equal(mine.length, 1, 'one audit entry');
+  assert.equal(mine[0].old_value, 'cill-org');
+  assert.deepEqual(col(), { a: 'vanity-two', b: 'vanity-two' }, 'the legacy column is written too');
+
+  const fay = await srv.register('fay');
+  assert.equal((await api('GET', '/invites/vanity-two')).body.guild.id, G);
+  assert.equal((await api('POST', '/invites/vanity-two', fay.token)).status, 200);
+  assert.deepEqual((await set('vanity-two')).body, { code: 'vanity-two', uses: 1 }, 'the same code keeps its uses');
+  assert.deepEqual((await set('ab')).body, { code: 'ab', uses: 0 }, 'two characters work');
+  assert.equal((await api('GET', '/invites/ab')).status, 200);
+  assert.equal((await set('a_b')).body.code, 'a_b', 'underscore');
+  for (const bad of ['a', 'has space', 'x'.repeat(33), 5]) assert.equal((await set(bad)).status, 400, String(bad));
+
+  // taken: by another server in either column
+  const other = (await api('POST', '/guilds', fay.token, { name: 'Other' })).body;
+  const otherSet = code => api('PATCH', `/guilds/${other.id}/vanity-url`, fay.token, { code });
+  assert.equal((await otherSet('a_b')).body.code, 50020);
+  const d = new DatabaseSync(join(srv.dataDir, 'cillcord.sqlite'));
+  try { d.prepare("UPDATE guilds SET vanity_url_code = NULL, vanity_code = 'legacy-only' WHERE id = ?").run(G); } finally { d.close(); }
+  assert.equal((await api('GET', '/invites/legacy-only')).body.guild.id, G, 'a legacy-only code still resolves');
+  assert.deepEqual((await api('GET', url, carol.token)).body.code, 'legacy-only');
+  assert.equal((await otherSet('legacy-only')).body.code, 50020, 'the legacy column counts');
+  assert.equal((await otherSet(g.invite.code.toLowerCase())).status, 200 /* a lower-cased invite code is not an invite code */);
+
+  // clearing stops the link in both columns
+  assert.deepEqual((await set(null)).body, { code: null, uses: 0 });
+  assert.deepEqual(col(), { a: null, b: null });
+  assert.equal((await api('GET', '/invites/legacy-only')).status, 404);
+  assert.equal((await set('')).body.code, null);
+  await set('again');
+  assert.equal((await set('')).status, 200);
+  assert.equal((await api('GET', '/invites/again')).status, 404);
 });

@@ -1,6 +1,6 @@
 import { get, all, run, tx, json, memberIds, memberRow, memberObj, userById } from '../db.js';
 import { HttpError, str, int, bool, list, invalid, notFound, missingPermissions } from '../errors.js';
-import { P, need, has, channelPerms, guildPerms, requireAbove, requireAssignable } from '../permissions.js';
+import { P, need, has, isTimedOut, channelPerms, guildPerms, requireAbove, requireAssignable } from '../permissions.js';
 import { sendToUsers, visibility, syncVisibility } from '../gateway.js';
 import { inVoice, voiceState, disconnect, move, recheck } from '../voice.js';
 import { audit, A, diff } from '../audit.js';
@@ -57,6 +57,7 @@ async function patchMe(ctx) {
   const body = ctx.body ?? {};
   const g = loadGuild(params.id, user);
   const before = memberRow(g.id, user.id);
+  if (isTimedOut(before) && ['nick', 'bio', 'avatar', 'banner', 'display_name_font_id', 'display_name_effect_id', 'display_name_colors'].some(k => body[k] !== undefined)) throw missingPermissions(); // others see it while the timeout lasts
   const changes = {};
   if (body.nick !== undefined) {
     need(g.perms, P.CHANGE_NICKNAME);

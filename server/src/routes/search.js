@@ -2,9 +2,9 @@ import { randomBytes } from 'node:crypto';
 import { get, all, isMember, threadObj, threadMemberObj, userById } from '../db.js';
 import { invalid, intParam, idParam, notFound } from '../errors.js';
 import { P, has, need, channelPerms, isThread } from '../permissions.js';
-import { messageObj, getChannel, AUTHOR_IS_ID_SQL } from '../message.js';
+import { messageObj, getChannel } from '../message.js';
 import { loadChannel } from './channels.js';
-import { forViewer, seesContent } from './messages.js';
+import { forViewer, seesContent, botReadableSql } from './messages.js';
 
 export const SEARCH_RESULT_CAP = 10000;
 
@@ -78,9 +78,9 @@ function search(query, readable, userId) {
   // a bot without message content matches text and contents only where redact() would show them: DMs, its own
   // messages, messages mentioning it; otherwise hits and total_results would reveal what it cannot read
   if ((join || query.has('has')) && !seesContent(viewer)) {
-    where.push(`(m.channel_id IN (SELECT value FROM json_each(?)) OR (m.author_id = ? AND ${AUTHOR_IS_ID_SQL})
-      OR m.content LIKE '%<@' || ? || '>%' OR m.content LIKE '%<@!' || ? || '>%')`);
-    args.push(JSON.stringify(channels.filter(c => !c.guild_id).map(c => c.id)), userId, userId, userId);
+    const own = botReadableSql(userId);
+    where.push(`(m.channel_id IN (SELECT value FROM json_each(?)) OR ${own.sql})`);
+    args.push(JSON.stringify(channels.filter(c => !c.guild_id).map(c => c.id)), ...own.args);
   }
   const authors = [...ids(query, 'author_id'), ...ids(query, 'from'), ...ids(query, 'author')];
   if (authors.length) {
@@ -90,6 +90,12 @@ function search(query, readable, userId) {
   for (const id of ids(query, 'mentions')) {
     where.push("(m.content LIKE '%<@' || ? || '>%' OR m.content LIKE '%<@!' || ? || '>%')");
     args.push(id, id);
+    // the mentions array names only guild members, so a bot without message content reads raw text about other ids only where it may read the message
+    if (!seesContent(viewer)) {
+      const own = botReadableSql(userId);
+      where.push(`(m.channel_id IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM channels c JOIN members mm ON mm.guild_id = c.guild_id WHERE c.id = m.channel_id AND mm.user_id = ?) OR ${own.sql})`);
+      args.push(JSON.stringify(channels.filter(c => !c.guild_id).map(c => c.id)), id, ...own.args);
+    }
   }
   const everyone = boolParam(query, 'mention_everyone');
   if (everyone !== null) where.push(`m.mention_everyone = ${Number(everyone)}`);

@@ -628,3 +628,128 @@ test('every new v7 admin route refuses non-admins and anonymous callers', async 
     assert.equal((await hub.api(method, path, null, body)).status, 401, `${method} ${path}`);
   }
 });
+
+// linked nodes that are not real servers: a well-known answer with their key (3411, 3412, 3413) and signed heartbeats
+async function fakeNode(port, name) {
+  const key = newKeyPair().privateKey;
+  const web = await listen((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ public_key: publicKeyText(key), name })); }, port);
+  const url = `http://127.0.0.1:${port}`;
+  const linked = await hub.api('POST', '/federation/link', null, { code: (await hubCode()).code, node_url: url, node_public_key: publicKeyText(key) });
+  assert.equal(linked.status, 200, JSON.stringify(linked.body));
+  const n = { id: linked.body.node_id, name, web };
+  n.beat = async servers => {
+    const path = '/api/v9/federation/heartbeat';
+    const body = JSON.stringify({ name, servers });
+    const r = await fetch(HUB + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...signRequest(key, n.id, 'POST', path, body) }, body });
+    assert.equal(r.status, 200);
+    return r.json();
+  };
+  return n;
+}
+const server = (guild_id, name, over = {}) => ({ guild_id, name, category: 'gaming', member_count: 3, ...over });
+const rowOf = (guildId, nodeId) => sql(hub, 'SELECT id, hidden, hidden_reason FROM directory_entries WHERE guild_id = ? AND node_id = ?', guildId, nodeId)[0];
+const openReports = row => sql(hub, `SELECT COUNT(*) AS n FROM directory_reports WHERE entry_id = ? AND status = 'open'`, row.id)[0].n;
+const hiddenFor = r => r.hidden.map(h => h.guild_id);
+
+test('directory moderation acts on the addressed listing when two nodes claim the same guild id', async () => {
+  const A = await fakeNode(3411, 'Node A');
+  const B = await fakeNode(3412, 'Node B');
+  const bob = await hub.register('squatbob');
+  const GID = '7000000000000000001';
+  const GID2 = '7000000000000000002';
+  const sA = [server(GID, 'Alpha'), server(GID2, 'Alpha two')];
+  const sB = [server(GID2, 'Beta two'), server(GID, 'Beta')];
+  const stmt = { hidden: true, category: 'spam', reason: 'spam' };
+  const act = (m, path, who = hubAdmin, body) => hub.api(m, path, who.token, body);
+  const only = (rowA, rowB, a, b, why) => assert.deepEqual([rowA, rowB].map(r => [r.hidden, openReports(r)]), [a, b], why);
+  try {
+    await A.beat(sA);
+    await B.beat(sB); // B claims A's GID later, and GID2 is claimed by A first too
+    const [a, b] = [rowOf(GID, A.id), rowOf(GID, B.id)];
+    assert.ok(a && b);
+
+    // no node_id: the oldest claim (A) takes it, whoever claims later
+    assert.equal((await act('POST', `/discoverable-guilds/${GID}/report`, alice, { reason: 'spam' })).status, 201);
+    only(a, b, [0, 1], [0, 0], 'report, no node_id');
+    assert.equal((await act('DELETE', `/admin/directory/${GID}/reports`)).status, 204);
+    only(a, b, [0, 0], [0, 0], 'dismiss, no node_id');
+    assert.equal((await act('POST', `/discoverable-guilds/${GID}/report`, alice, { reason: 'spam' })).status, 400, 'A was reported before');
+    assert.equal((await act('PATCH', `/admin/directory/${GID}`, hubAdmin, stmt)).body.guild.name, 'Alpha');
+    assert.deepEqual([rowOf(GID, A.id).hidden, rowOf(GID, B.id).hidden], [1, 0], 'hide, no node_id');
+    assert.deepEqual([hiddenFor(await A.beat(sA)), hiddenFor(await B.beat(sB))], [[GID], []]);
+    assert.equal((await act('POST', `/discoverable-guilds/${GID}/report`, bob, { reason: 'spam' })).status, 404, 'a hidden oldest claim is not swapped for the later one');
+    assert.equal(openReports(rowOf(GID, B.id)), 0);
+    assert.equal((await act('PATCH', `/admin/directory/${GID}`, hubAdmin, { hidden: false })).body.guild.name, 'Alpha');
+    assert.deepEqual(hiddenFor(await A.beat(sA)), []);
+
+    // node_id picks the exact row, here the later claimant's
+    assert.equal((await act('POST', `/discoverable-guilds/${GID}/report?node_id=${B.id}`, bob, { reason: 'spam' })).status, 201);
+    only(rowOf(GID, A.id), rowOf(GID, B.id), [0, 0], [0, 1], 'report, node_id of B');
+    const hid = await act('PATCH', `/admin/directory/${GID}?node_id=${B.id}`, hubAdmin, stmt);
+    assert.deepEqual([hid.body.guild.name, hid.body.reports, hid.body.hidden], ['Beta', [], true], 'the answer is the row that changed');
+    assert.deepEqual([rowOf(GID, A.id).hidden, rowOf(GID, B.id).hidden], [0, 1]);
+    assert.deepEqual([hiddenFor(await A.beat(sA)), hiddenFor(await B.beat(sB))], [[], [GID]], 'the remembered hide belongs to B');
+    assert.equal((await act('POST', `/discoverable-guilds/${GID}/report?node_id=${A.id}`, bob, { reason: 'spam' })).status, 201);
+    assert.equal((await act('DELETE', `/admin/directory/${GID}/reports?node_id=${B.id}`)).status, 204);
+    only(rowOf(GID, A.id), rowOf(GID, B.id), [0, 1], [1, 0], 'dismiss, node_id of B leaves A alone');
+    assert.equal((await act('PATCH', `/admin/directory/${GID}?node_id=${B.id}`, hubAdmin, { hidden: false })).body.hidden, false);
+    assert.equal((await act('DELETE', `/admin/directory/${GID}/reports?node_id=${A.id}`)).status, 204);
+
+    // the same with A addressed explicitly while B is the one in front: GID2 was claimed by A first, B second, and by node_id either works
+    const [a2, b2] = [rowOf(GID2, A.id), rowOf(GID2, B.id)];
+    assert.equal((await act('PATCH', `/admin/directory/${GID2}?node_id=${A.id}`, hubAdmin, stmt)).body.guild.name, 'Alpha two');
+    assert.deepEqual([rowOf(GID2, A.id).hidden, rowOf(GID2, B.id).hidden], [1, 0]);
+    assert.deepEqual([hiddenFor(await A.beat(sA)), hiddenFor(await B.beat(sB))], [[GID2], []]);
+    assert.equal((await act('PATCH', `/admin/directory/${GID2}?node_id=${A.id}`, hubAdmin, { hidden: false })).body.hidden, false);
+    assert.ok(a2 && b2);
+
+    // junk node_id values: no crash, nothing to find, no access to a row through another node's id
+    for (const v of ['', 'abc', '0', "' OR 1=1 --", '9'.repeat(40)]) {
+      const q = `?node_id=${encodeURIComponent(v)}`;
+      assert.equal((await act('POST', `/discoverable-guilds/${GID}/report${q}`, alice, { reason: 'spam' })).status, 404, `report node_id=${v}`);
+      assert.equal((await act('PATCH', `/admin/directory/${GID}${q}`, hubAdmin, { hidden: false })).status, 404);
+      assert.equal((await act('DELETE', `/admin/directory/${GID}/reports${q}`)).status, 404);
+    }
+  } finally {
+    await A.beat([]); await B.beat([]);
+    A.web.close(); B.web.close();
+  }
+});
+
+test('directory: a node listing and a hub server keep their whole lifecycle, and a node claiming a hub server\'s id changes nothing for it', async () => {
+  const C = await fakeNode(3413, 'Node C');
+  const hubGuild = (await hub.api('POST', '/guilds', alice.token, { name: 'Hub Lifecycle' })).body;
+  const GID = '7000000000000000003';
+  const stmt = { hidden: true, category: 'spam', reason: 'spam' };
+  const browse = async () => (await hub.api('GET', '/discoverable-guilds?query=Lifecycle', hubAdmin.token)).body.guilds.map(x => x.id);
+  try {
+    // node: create, update, report, hide, kept hidden over heartbeats, unhide, remove
+    assert.deepEqual(hiddenFor(await C.beat([server(GID, 'Node Lifecycle')])), []);
+    assert.deepEqual(await browse(), [GID]);
+    await C.beat([server(GID, 'Node Lifecycle 2', { member_count: 9 })]);
+    assert.deepEqual(sql(hub, 'SELECT name, member_count FROM directory_entries WHERE guild_id = ?', GID).map(r => ({ ...r })), [{ name: 'Node Lifecycle 2', member_count: 9 }]);
+    assert.equal((await hub.api('POST', `/discoverable-guilds/${GID}/report`, alice.token, { reason: 'spam' })).status, 201);
+    assert.equal((await hub.api('PATCH', `/admin/directory/${GID}`, hubAdmin.token, { hidden: true })).status, 400, 'a statement of reasons');
+    assert.equal((await hub.api('PATCH', `/admin/directory/${GID}`, hubAdmin.token, stmt)).body.hidden, true);
+    assert.deepEqual([hiddenFor(await C.beat([server(GID, 'Node Lifecycle 2')])), await browse()], [[GID], []], 'a heartbeat keeps it hidden');
+    assert.equal((await hub.api('PATCH', `/admin/directory/${GID}`, hubAdmin.token, { hidden: false })).body.hidden, false);
+    assert.deepEqual([hiddenFor(await C.beat([server(GID, 'Node Lifecycle 2')])), await browse()], [[], [GID]]);
+    assert.deepEqual(hiddenFor(await C.beat([])), []);
+    assert.deepEqual(await browse(), [], 'omitted from the heartbeat: removed');
+
+    // hub server: list, report, hide, unhide, dismiss; a node claiming its id changes none of it
+    assert.equal((await hub.api('PATCH', `/guilds/${hubGuild.id}/discovery-metadata`, alice.token, { listed: true, primary_category_id: 3 })).status, 200);
+    await C.beat([server(hubGuild.id, 'Impostor')]);
+    assert.equal((await hub.api('POST', `/discoverable-guilds/${hubGuild.id}/report`, hubAdmin.token, { reason: 'other' })).status, 201);
+    assert.equal(openReports(rowOf(hubGuild.id, '')), 1);
+    assert.equal(openReports(rowOf(hubGuild.id, C.id)), 0);
+    assert.equal((await hub.api('PATCH', `/admin/directory/${hubGuild.id}`, hubAdmin.token, stmt)).body.guild.name, 'Hub Lifecycle');
+    assert.deepEqual([rowOf(hubGuild.id, '').hidden, rowOf(hubGuild.id, C.id).hidden], [1, 0]);
+    assert.deepEqual(hiddenFor(await C.beat([server(hubGuild.id, 'Impostor')])), []);
+    assert.equal((await hub.api('PATCH', `/admin/directory/${hubGuild.id}`, hubAdmin.token, { hidden: false })).body.hidden, false);
+    assert.equal((await hub.api('DELETE', `/admin/directory/${hubGuild.id}/reports`, hubAdmin.token)).status, 204);
+  } finally {
+    await C.beat([]);
+    C.web.close();
+  }
+});

@@ -4,6 +4,7 @@ import { HttpError, str, int, invalid, snowflakeField } from '../errors.js';
 import { P } from '../permissions.js';
 import { readPayload, prepare, send } from '../compose.js';
 import { messageObj } from '../message.js';
+import { forViewer } from './messages.js';
 import { moderateMessage } from '../automod.js';
 import { insertThread, checkStart, announceNew, durationField, tagsField } from './threads.js';
 
@@ -71,5 +72,5 @@ export async function createPost(ctx, parent) {
   announceNew(ctx, parent, t);
   mod?.execute(m.id);
   ctx.status = 201;
-  return { ...threadObj(get('SELECT * FROM channels WHERE id = ?', t.id), ctx.user.id), message: messageObj(m, t, ctx.user.id) };
+  return { ...threadObj(get('SELECT * FROM channels WHERE id = ?', t.id), ctx.user.id), message: forViewer(messageObj(m, t, ctx.user.id), ctx.user) };
 }

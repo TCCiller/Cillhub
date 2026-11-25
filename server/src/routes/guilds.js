@@ -252,26 +252,6 @@ function backupRestore(ctx) {
   return createGuild({ user: ctx.user, body: { name: b.name, channels: b.channels, roles: b.roles } });
 }
 
-function getVanityUrl({ params, user }) {
-  const g = loadGuild(params.id, user);
-  const row = get('SELECT vanity_url_code, vanity_code, vanity_uses FROM guilds WHERE id = ?', g.id);
-  return { code: row?.vanity_url_code ?? row?.vanity_code ?? null, uses: row?.vanity_uses ?? 0 };
-}
-
-function patchVanityUrl({ params, body, user }) {
-  const g = loadGuild(params.id, user);
-  need(g.perms, P.MANAGE_GUILD);
-  let code = body?.code == null ? null : String(body.code).trim().toLowerCase();
-  if (code !== null) {
-    if (!/^[a-z0-9_-]{2,32}$/.test(code)) throw invalid('code', 'INVALID_VANITY_CODE', 'Must be 2-32 alphanumeric or dash characters');
-    const existing = get('SELECT id FROM guilds WHERE (vanity_url_code = ? OR vanity_code = ?) AND id != ?', code, code, g.id);
-    // an old lower-case invite link, even expired, must not start leading to another server
-    if (existing || get('SELECT 1 FROM invites WHERE code = ?', code)) throw new HttpError(400, 50020, 'Vanity URL already in use');
-  }
-  run('UPDATE guilds SET vanity_url_code = ?, vanity_code = ? WHERE id = ?', code, code, g.id);
-  return { code, uses: get('SELECT vanity_uses FROM guilds WHERE id = ?', g.id)?.vanity_uses ?? 0 };
-}
-
 export default [
   ['POST', '/guilds', createGuild, { maxBody: 32 * 1024 * 1024 }], // imports carry emoji as data URIs (up to 200, typically far below 256 KiB each)
   ['GET', '/guilds/:id', ({ params, user }) => guildObj(loadGuild(params.id, user), visibleChannels(params.id, user.id))],
@@ -281,8 +261,6 @@ export default [
   ['GET', '/guilds/:id/members', ({ params, query, user }) => membersOf(loadGuild(params.id, user).id, intParam(query, 'limit', 1000, 1, 1000))],
   ['GET', '/guilds/:id/anti-raid', getAntiRaid],
   ['PUT', '/guilds/:id/anti-raid', putAntiRaid],
-  ['GET', '/guilds/:id/vanity-url', getVanityUrl],
-  ['PATCH', '/guilds/:id/vanity-url', patchVanityUrl],
   ['GET', '/guilds/:id/backup-export', backupExport],
   ['POST', '/guilds/backup-restore', backupRestore], // name, channels and roles only
   ['DELETE', '/users/@me/guilds/:id', leaveGuild],

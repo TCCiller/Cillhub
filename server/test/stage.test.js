@@ -188,3 +188,51 @@ test('stage hand-raise refuses years outside 0000-9999, accepts 9999, and clamps
   assert.ok(Date.parse(got) >= before && Date.parse(got) <= after, `expected clamped to now, got ${got}`);
   join(bob, null);
 });
+
+test('a stage moderator without MANAGE_EVENTS cannot start or end a linked scheduled event', async () => {
+  const ev = `/guilds/${g.guild.id}/scheduled-events`;
+  const st = (await api('POST', `/guilds/${g.guild.id}/channels`, alice.token, { name: 'Events Stage', type: 13 })).body;
+  await api('PUT', `/channels/${st.id}/permissions/${bob.id}`, alice.token, { type: 1, allow: bits(22, 24), deny: '0' });
+  const e = (await api('POST', ev, alice.token, { name: 'Gala', entity_type: 1, channel_id: st.id, privacy_level: 2, scheduled_start_time: new Date(Date.now() + 36e5).toISOString() })).body;
+  const status = async () => (await api('GET', `${ev}/${e.id}`, alice.token)).body.status;
+  const denied = await api('POST', '/stage-instances', bob.token, { channel_id: st.id, topic: 'x', guild_scheduled_event_id: e.id });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.body.code, 50013);
+  assert.equal(await status(), 1);
+  assert.equal((await api('POST', '/stage-instances', alice.token, { channel_id: st.id, topic: 'x', guild_scheduled_event_id: e.id })).status, 200);
+  assert.equal(await status(), 2);
+  const del = await api('DELETE', `/stage-instances/${st.id}`, bob.token);
+  assert.equal(del.status, 403);
+  assert.equal(del.body.code, 50013);
+  assert.equal(await status(), 2);
+  assert.equal((await api('DELETE', `/stage-instances/${st.id}`, alice.token)).status, 204);
+  assert.equal(await status(), 3);
+});
+
+test('stage events: deleted event never blocks closing, hidden or missing events look the same to a mod', async () => {
+  const ev = `/guilds/${g.guild.id}/scheduled-events`;
+  const start = () => new Date(Date.now() + 36e5).toISOString();
+  const st = (await api('POST', `/guilds/${g.guild.id}/channels`, alice.token, { name: 'Gone Stage', type: 13 })).body;
+  const e = (await api('POST', ev, alice.token, { name: 'Gone', entity_type: 1, channel_id: st.id, privacy_level: 2, scheduled_start_time: start() })).body;
+  assert.equal((await api('POST', '/stage-instances', alice.token, { channel_id: st.id, topic: 'x', guild_scheduled_event_id: e.id })).status, 200);
+  assert.equal((await api('DELETE', `${ev}/${e.id}`, alice.token)).status, 204);
+  assert.equal((await api('DELETE', `/stage-instances/${st.id}`, alice.token)).status, 204);
+
+  // bob: stage mod and MANAGE_EVENTS, but cannot see the private voice channel the event lives in
+  const role = (await api('POST', `/guilds/${g.guild.id}/roles`, alice.token, { name: 'Events', permissions: bits(33) })).body;
+  await api('PATCH', `/guilds/${g.guild.id}/members/${bob.id}`, alice.token, { roles: [role.id] });
+  const st2 = (await api('POST', `/guilds/${g.guild.id}/channels`, alice.token, { name: 'Mod Stage', type: 13 })).body;
+  await api('PUT', `/channels/${st2.id}/permissions/${bob.id}`, alice.token, { type: 1, allow: bits(22, 24), deny: '0' });
+  const priv = (await api('POST', `/guilds/${g.guild.id}/channels`, alice.token, { name: 'secret', type: 2 })).body;
+  await api('PUT', `/channels/${priv.id}/permissions/${g.guild.id}`, alice.token, { type: 0, allow: '0', deny: bits(10) });
+  const hidden = (await api('POST', ev, alice.token, { name: 'Hidden', entity_type: 2, channel_id: priv.id, privacy_level: 2, scheduled_start_time: start() })).body;
+  const post = id => api('POST', '/stage-instances', bob.token, { channel_id: st2.id, topic: 'x', guild_scheduled_event_id: id });
+  const a = await post(hidden.id);
+  const b = await post('1');
+  for (const r of [a, b]) {
+    assert.equal(r.status, 403);
+    assert.equal(r.body.code, 50013);
+  }
+  assert.deepEqual(a.body, b.body);
+  assert.equal((await api('GET', `${ev}/${hidden.id}`, alice.token)).body.status, 1);
+});

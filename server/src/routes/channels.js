@@ -9,10 +9,10 @@ import { audit, A, diff } from '../audit.js';
 import { loadGuild } from './guilds.js';
 import { patchThread, deleteThread, durationField, threadListSync } from './threads.js';
 import { checkThreadOpen } from '../compose.js';
-import { requireUnarchived } from './messages.js';
+import { requireUnarchived, requireDmOpen } from './messages.js';
 import { forumFields } from './forums.js';
 import { createGroup, patchGroup, leaveGroup } from './groups.js';
-import { blockedEither } from './relationships.js';
+import { blockedEither, dmClosed } from './relationships.js';
 import { schedule } from '../timers.js';
 
 // a channel the user can VIEW, with their permissions in it as ch.perms
@@ -84,11 +84,12 @@ function iconEmoji(v, guildId) {
 const AUDITED = ['icon_emoji', 'theme_color', 'name', 'type', 'topic', 'nsfw', 'rate_limit_per_user', 'user_limit', 'parent_id', 'default_auto_archive_duration',
   'available_tags', 'default_reaction_emoji', 'default_sort_order', 'default_forum_layout', 'default_thread_rate_limit_per_user', 'flags'];
 
-function parentField(body, guildId, type) {
+// a category the user cannot see answers like one that does not exist, unless it is the channel's current parent (clients send it back)
+function parentField(body, guildId, type, user, current = null) {
   const v = body?.parent_id;
   if (v == null) return null;
   const parent = get('SELECT * FROM channels WHERE id = ? AND guild_id = ? AND type = 4', String(v), guildId);
-  if (!parent || type === 4) throw invalid('parent_id', 'CHANNEL_PARENT_INVALID', 'Parent must be a category of this guild.');
+  if (!parent || type === 4 || (parent.id !== current && !has(channelPerms(parent, user.id), P.VIEW_CHANNEL))) throw invalid('parent_id', 'CHANNEL_PARENT_INVALID', 'Parent must be a category of this guild.');
   return parent.id;
 }
 
@@ -139,13 +140,10 @@ function createChannel(ctx) {
   const type = body?.type ?? 0;
   if (!CREATABLE.includes(type)) throw invalid('type', 'BASE_TYPE_CHOICES', `Value must be one of {${CREATABLE.join(', ')}}.`);
   const channelName = name(body, type);
-  const parentId = parentField(body, g.id, type);
+  const parentId = parentField(body, g.id, type, user);
   const extra = settings(body, type, {}, g.id);
-  let overwrites;
-  if (body.permission_overwrites !== undefined) {
-    overwrites = parseOverwrites(body, g.id);
-    checkOverwrites(g.id, user, g.perms, [], overwrites);
-  } else overwrites = parentId ? overwritesOf(parentId) : [];
+  const overwrites = body.permission_overwrites !== undefined ? parseOverwrites(body, g.id) : parentId ? overwritesOf(parentId) : [];
+  checkOverwrites(g.id, user, g.perms, [], overwrites);
   const id = snowflake();
   tx(() => {
     run(`INSERT INTO channels (id, type, guild_id, name, parent_id, position)
@@ -199,8 +197,7 @@ function reorder({ params, body, user }) {
   const changes = list(body).map(item => {
     const ch = get('SELECT * FROM channels WHERE id = ? AND guild_id = ? AND type NOT IN (10, 11, 12)', snowflakeField(item, 'id'), g.id);
     if (!ch || !seen.has(ch.id)) throw invalid('id', 'CHANNEL_INVALID', 'Unknown channel in this guild.');
-    const parentId = item.parent_id === undefined ? ch.parent_id : parentField(item, g.id, ch.type);
-    if (parentId && parentId !== ch.parent_id && !seen.has(parentId)) throw invalid('parent_id', 'CHANNEL_PARENT_INVALID', 'Parent must be a category of this guild.');
+    const parentId = item.parent_id === undefined ? ch.parent_id : parentField(item, g.id, ch.type, user, ch.parent_id);
     return { ch, position: int(item, 'position', 0, 10000), parentId };
   });
   const changed = changes.filter(c => c.position !== c.ch.position || c.parentId !== c.ch.parent_id);
@@ -217,7 +214,7 @@ function patchChannel(ctx) {
     if (body.message_ttl !== undefined) {
       const ttl = body.message_ttl === null ? 0 : int(body, 'message_ttl', 0, 31536000);
       const other = channelUserIds(t).find(id => id !== ctx.user.id);
-      if (other && (blockedEither(ctx.user.id, other) || userById(other)?.system)) throw new HttpError(403, 50007, 'Cannot change this conversation.');
+      if (other && (dmClosed(t.id, ctx.user.id, other) || userById(other)?.system)) throw new HttpError(403, 50007, 'Cannot change this conversation.');
       // covers messages from now on only: what either side sent before stays
       run('UPDATE channels SET message_ttl = ?, message_ttl_since = CASE WHEN ? > 0 THEN COALESCE(message_ttl_since, ?) END WHERE id = ?', ttl, ttl, snowflake(), t.id);
       if (ttl > 0) schedule();
@@ -235,7 +232,7 @@ function patchChannel(ctx) {
   if (type !== ch.type && !([0, 5].includes(type) && [0, 5].includes(ch.type))) throw invalid('type', 'BASE_TYPE_CHOICES', 'Only text and announcement channels convert.');
   const next = { type, ...settings(body, type, ch) };
   if (body.name !== undefined) next.name = name(body, type);
-  if (body.parent_id !== undefined) next.parent_id = parentField(body, ch.guild_id, ch.type);
+  if (body.parent_id !== undefined) next.parent_id = parentField(body, ch.guild_id, ch.type, user, ch.parent_id);
   let overwrites;
   if (body.permission_overwrites !== undefined) {
     overwrites = parseOverwrites(body, ch.guild_id);
@@ -382,6 +379,7 @@ function updateMessageRequest({ params, body, user }) {
 function typing({ params, user }) {
   const ch = loadChannel(params.id, user);
   requireUnarchived(ch);
+  requireDmOpen(ch, user.id);
   checkThreadOpen(ch, ch.perms);
   need(ch.perms, P.SEND_MESSAGES);
   sendToUsers(viewersOf(ch), 'TYPING_START', {

@@ -22,7 +22,7 @@ use crate::model::{
     Activity, ActivityTimestamps, Channel, CustomStatus, Guild, Member, Message, Presence,
     Relationship, Role, User, VoiceState,
 };
-use crate::native_gateway::{spawn_with_commands, GatewayCommand, GatewayEvent};
+use crate::native_gateway::{release_queue_bytes, spawn_hub, GatewayCommand, GatewayEvent, QueueBytes};
 use crate::settings::AppSettings;
 use crate::state::State;
 use crate::i18n::tr;
@@ -159,6 +159,7 @@ pub struct CillhubApp {
     pub state: State,
     pub api: Option<ApiClient>,
     pub gateway_rx: Option<Receiver<GatewayEvent>>,
+    pub gateway_queued: Option<QueueBytes>,
     pub gateway_cmd_tx: Option<Sender<GatewayCommand>>,
     /// Saved private nodes connected next to the hub, by origin (connections.rs).
     pub conns: std::collections::HashMap<String, connections::NodeConn>,
@@ -252,6 +253,7 @@ pub struct CillhubApp {
     loading_history: std::collections::HashSet<String>,
     /// Servers whose member list request is in flight (one at a time per server).
     loading_members: std::collections::HashSet<String>,
+    loading_own_member: std::collections::HashSet<String>,
     /// newest request per key (new_scope / in_scope)
     scopes: std::collections::HashMap<String, u64>,
     /// the channel the canvas editor holds
@@ -389,6 +391,7 @@ impl CillhubApp {
             state: State::default(),
             api: None,
             gateway_rx: None,
+            gateway_queued: None,
             gateway_cmd_tx: None,
             conns: Default::default(),
             front: None,
@@ -458,6 +461,7 @@ impl CillhubApp {
             session_gen: 0,
             loading_history: Default::default(),
             loading_members: Default::default(),
+            loading_own_member: Default::default(),
             scopes: Default::default(),
             canvas_cid: None,
             row_heights: Default::default(),
@@ -584,9 +588,11 @@ impl CillhubApp {
         self.api = Some(ApiClient::new(origin.clone(), Some(token.clone())));
         let (ev_tx, ev_rx) = mpsc::sync_channel(crate::native_gateway::EVENT_QUEUE);
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        spawn_with_commands(origin, token, ev_tx, cmd_rx);
+        let queued = QueueBytes::default();
+        spawn_hub(origin, token, ev_tx, cmd_rx, queued.clone());
         self.gateway_rx = Some(ev_rx);
         self.gateway_cmd_tx = Some(cmd_tx);
+        self.gateway_queued = Some(queued);
         self.authenticated = true;
         self.auth_error = None;
         self.clear_auth_secrets();
@@ -606,11 +612,13 @@ impl CillhubApp {
         self.new_session();
         self.loading_history.clear();
         self.loading_members.clear();
+        self.loading_own_member.clear();
         if let Some(tx) = &self.gateway_cmd_tx {
             let _ = tx.send(GatewayCommand::Shutdown);
         }
         self.gateway_rx = None;
         self.gateway_cmd_tx = None;
+        self.gateway_queued = None;
         if let Some((origin, token)) = self.api.as_ref().and_then(|a| {
             a.token.as_ref().filter(|t| !t.is_empty()).map(|t| (a.origin.origin().ascii_serialization(), t.clone()))
         }) {
@@ -1099,11 +1107,36 @@ impl CillhubApp {
                 return;
             }
             if let Some(list) = report(&mut app.status_banner, r) {
-                report(&mut app.status_banner, app.state.set_members(&gid, list));
+                if report(&mut app.status_banner, app.state.set_members(&gid, list)).is_some() {
+                    app.load_own_member(&gid);
+                }
             }
         });
         if !sent {
             self.loading_members.remove(guild_id);
+        }
+    }
+
+    /// A server past the first member page may not list the signed-in user, whose roles every permission is worked out
+    /// from: ask for that one member (GET /guilds/{id}/members/{user}). One request, none when it is there, none again on an error.
+    fn load_own_member(&mut self, guild_id: &str) {
+        let Some(me) = self.state.me.as_ref().map(|u| u.id.clone()) else { return };
+        if self.state.members.get(guild_id).is_some_and(|m| m.contains_key(&me)) || !self.loading_own_member.insert(guild_id.to_string()) {
+            return;
+        }
+        let gid = guild_id.to_string();
+        let scope = self.scope_now("history");
+        let sent = self.api_get(format!("/guilds/{gid}/members/{me}"), move |app, r| {
+            app.loading_own_member.remove(&gid);
+            if !app.in_scope("history", scope) || !app.state.guilds.contains_key(&gid) {
+                return; // the next READY loads the members again and asks again
+            }
+            if let Some(member) = report(&mut app.status_banner, r) {
+                report(&mut app.status_banner, app.state.set_members(&gid, Value::Array(vec![member])));
+            }
+        });
+        if !sent {
+            self.loading_own_member.remove(guild_id);
         }
     }
 
@@ -1203,12 +1236,22 @@ impl CillhubApp {
 
     fn hub_events(&mut self) {
         let mut events = Vec::new();
+        let queued = self.gateway_queued.clone();
         if let Some(rx) = &self.gateway_rx {
             while let Ok(ev) = rx.try_recv() {
                 events.push(ev);
             }
         }
         for ev in events {
+            let ev = match ev {
+                GatewayEvent::NodeDispatch(name, payload, bytes) => {
+                    if let Some(q) = &queued {
+                        release_queue_bytes(q, bytes);
+                    }
+                    GatewayEvent::Dispatch(name, payload)
+                }
+                ev => ev,
+            };
             match ev {
                 GatewayEvent::Dispatch(name, payload) => {
                     let is_ready = name == "READY";
@@ -1290,7 +1333,7 @@ impl CillhubApp {
                 GatewayEvent::Connected => {
                     self.status_banner = None;
                 }
-                GatewayEvent::NodeDispatch(..) => {} // only node gateways send these
+                GatewayEvent::NodeDispatch(..) => {} // unwrapped above after releasing queued bytes
             }
         }
     }
@@ -2507,6 +2550,123 @@ mod tests {
         (origin, t)
     }
 
+    /// A hub answering each request with the body of the first route its request line contains; returns its origin and the request lines.
+    fn fake_hub_routes(routes: Vec<(&'static str, String)>, requests: usize) -> (Url, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = Url::parse(&format!("http://localhost:{}/", listener.local_addr().unwrap().port())).unwrap();
+        let t = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            listener.set_nonblocking(true).unwrap();
+            let until = Instant::now() + Duration::from_secs(3); // fewer requests than expected must fail the test, not hang it
+            for _ in 0..requests {
+                let mut sock = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(5)),
+                        Err(_) => return seen,
+                    }
+                };
+                sock.set_nonblocking(false).unwrap();
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string();
+                let (status, body) = routes.iter().find(|(k, _)| line.contains(k)).map(|(_, b)| ("200 OK", b.as_str())).unwrap_or(("404 Not Found", "{\"code\":10007,\"message\":\"Unknown Member\"}"));
+                let head = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = sock.write_all(head.as_bytes());
+                let _ = sock.write_all(body.as_bytes());
+                seen.push(line);
+            }
+            seen
+        });
+        (origin, t)
+    }
+
+    /// 1000 other members and not the signed-in user: the own member is asked for once and its roles then count.
+    fn big_server(app: &mut CillhubApp, with_me: bool) -> String {
+        let gid = "g_arena";
+        app.state.guilds.get_mut(gid).unwrap().owner_id = "u_boss".into();
+        app.state.members.remove(gid);
+        let mut page: Vec<Value> = (0..crate::state::MEMBER_PAGE - usize::from(with_me)).map(|i| serde_json::json!({ "user": { "id": format!("u_{i}"), "username": "x" }, "roles": [] })).collect();
+        if with_me {
+            page.push(serde_json::json!({ "user": { "id": "u_me", "username": "alex" }, "roles": ["r_captain"] }));
+        }
+        serde_json::to_string(&page).unwrap()
+    }
+
+    #[test]
+    fn own_member_outside_the_first_page_is_requested_and_counts() {
+        let mut app = CillhubApp::new(None, true);
+        let page = big_server(&mut app, false);
+        let own = r#"{"user":{"id":"u_me","username":"alex"},"roles":["r_captain"]}"#.to_string();
+        let (origin, hub) = fake_hub_routes(vec![("/members/u_me", own), ("/members?limit=1000", page)], 2);
+        app.api = Some(ApiClient::new(origin, None));
+        assert_eq!(app.guild_perms("g_arena") & crate::permissions::p::ADMINISTRATOR, 0, "no own member: the default role only");
+        app.load_members("g_arena");
+        settle(&mut app);
+        assert_eq!(hub.join().unwrap(), ["GET /api/v9/guilds/g_arena/members?limit=1000 HTTP/1.1", "GET /api/v9/guilds/g_arena/members/u_me HTTP/1.1"]);
+        assert_eq!(app.state.members["g_arena"]["u_me"].roles, ["r_captain"]);
+        assert_ne!(app.guild_perms("g_arena") & crate::permissions::p::ADMINISTRATOR, 0, "the role's permissions apply");
+        assert_eq!(app.state.members["g_arena"].len(), crate::state::MEMBER_PAGE + 1, "the others stay capped, the own member is extra");
+        // later member lists and gateway updates never drop it
+        let more: Vec<Value> = (0..crate::state::MEMBER_PAGE).map(|i| serde_json::json!({ "user": { "id": format!("v_{i}"), "username": "y" } })).collect();
+        app.state.set_members("g_arena", Value::Array(more)).unwrap();
+        assert!(app.state.members["g_arena"].contains_key("u_me"));
+        assert_ne!(app.guild_perms("g_arena") & crate::permissions::p::ADMINISTRATOR, 0);
+    }
+
+    /// Where the user feels it: a channel only a role of the user's own member opens, with the own member outside a full page.
+    /// Driven only through load_members and the answers it receives, so it also compiles against a client without the own-member request.
+    #[test]
+    fn a_channel_opened_by_my_role_is_allowed_once_my_member_arrives() {
+        use crate::permissions::p;
+        let mut app = CillhubApp::new(None, true);
+        let page = big_server(&mut app, false);
+        let overwrite = |id: &str, allow: u64, deny: u64| crate::model::Overwrite { id: id.into(), kind: 0, allow: allow.to_string(), deny: deny.to_string() };
+        app.state.guilds.get_mut("g_arena").unwrap().roles.push(Role { id: "r_vault".into(), name: "Vault".into(), position: 1, permissions: "0".into(), ..Default::default() });
+        app.state.channels.insert("c_vault".into(), Channel {
+            id: "c_vault".into(),
+            guild_id: Some("g_arena".into()),
+            name: Some("vault".into()),
+            permission_overwrites: vec![overwrite("g_arena", 0, p::VIEW_CHANNEL), overwrite("r_vault", p::VIEW_CHANNEL | p::SEND_MESSAGES, 0)],
+            ..Default::default()
+        });
+        let own = r#"{"user":{"id":"u_me","username":"alex"},"roles":["r_vault"]}"#.to_string();
+        let (origin, hub) = fake_hub_routes(vec![("/members/u_me", own), ("/members?limit=1000", page)], 2);
+        app.api = Some(ApiClient::new(origin, None));
+        assert_eq!(app.my_perms("c_vault"), 0, "before the member list: the channel is closed");
+        app.load_members("g_arena");
+        settle(&mut app);
+        let _ = hub.join();
+        assert_eq!(app.state.members["g_arena"].len() >= crate::state::MEMBER_PAGE, true, "the page of others is stored");
+        let perms = app.my_perms("c_vault");
+        assert!(perms & p::VIEW_CHANNEL != 0 && perms & p::SEND_MESSAGES != 0, "my own member arrived, so my role opens the channel (perms {perms:#x})");
+    }
+
+    #[test]
+    fn own_member_in_the_page_costs_no_extra_request_and_an_error_does_not_loop() {
+        let mut app = CillhubApp::new(None, true);
+        let page = big_server(&mut app, true);
+        let (origin, hub) = fake_hub_routes(vec![("/members?limit=1000", page)], 1);
+        app.api = Some(ApiClient::new(origin, None));
+        app.load_members("g_arena");
+        settle(&mut app);
+        assert_eq!(hub.join().unwrap().len(), 1, "one request, the own member was in the page");
+        assert_ne!(app.guild_perms("g_arena") & crate::permissions::p::ADMINISTRATOR, 0);
+
+        // the server does not know the own member: one request, an error shown, no second try
+        let page = big_server(&mut app, false);
+        let (origin, hub) = fake_hub_routes(vec![("/members?limit=1000", page)], 2);
+        app.api = Some(ApiClient::new(origin, None));
+        app.status_banner = None;
+        app.load_members("g_arena");
+        settle(&mut app);
+        assert_eq!(hub.join().unwrap().len(), 2);
+        assert!(app.status_banner.is_some());
+        assert!(!app.state.members["g_arena"].contains_key("u_me"));
+        assert!(app.loading_own_member.is_empty());
+    }
+
     fn dispatch(app: &mut CillhubApp, name: &str, payload: Value) {
         let (tx, rx) = mpsc::channel();
         tx.send(GatewayEvent::Dispatch(name.into(), payload)).unwrap();
@@ -2896,25 +3056,38 @@ mod tests {
         assert_eq!(reloaded.pending_revokes.len(), 1);
 
         let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_hub = stop.clone();
         let hub = std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 8192];
-            let n = sock.read(&mut buf).unwrap_or(0);
+            let mut reqs = Vec::new();
             let body = r#"{"code":40001,"message":"401: Unauthorized"}"#;
             let resp = format!(
                 "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            let _ = sock.write_all(resp.as_bytes());
-            String::from_utf8_lossy(&buf[..n]).into_owned()
+            while !stop_hub.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut sock, _)) => {
+                        let _ = sock.set_nonblocking(false);
+                        let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut buf = [0u8; 8192];
+                        let n = sock.read(&mut buf).unwrap_or(0);
+                        let _ = sock.write_all(resp.as_bytes());
+                        reqs.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+            reqs
         });
 
         let mut app2 = CillhubApp::new(None, true);
         app2.settings = reloaded;
         app2.retry_revokes();
-        let req = hub.join().unwrap();
-        assert!(req.starts_with("POST /api/v9/auth/logout "), "got: {req}");
-        assert!(req.to_ascii_lowercase().contains("authorization: hub-retry-token"), "got: {req}");
 
         let wait = Instant::now();
         while !app2.settings.pending_revokes.is_empty() {
@@ -2922,6 +3095,74 @@ mod tests {
             app2.tick_nodes();
             std::thread::sleep(Duration::from_millis(10));
         }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let reqs = hub.join().unwrap();
+        assert!(!reqs.is_empty(), "expected at least one logout request");
+        for req in &reqs {
+            assert!(req.starts_with("POST /api/v9/auth/logout "), "got: {req}");
+            assert!(req.to_ascii_lowercase().contains("authorization: hub-retry-token"), "got: {req}");
+        }
+    }
+
+    #[test]
+    fn hub_event_drain_releases_bytes_including_ignored_events_and_exceeds_budget() {
+        use crate::gateway::Action;
+        use crate::native_gateway::{hub_actions, HUB_QUEUE_BYTES};
+        use std::sync::atomic::Ordering;
+
+        let mut app = CillhubApp::new(None, true);
+        let (tx, rx) = mpsc::sync_channel(crate::native_gateway::EVENT_QUEUE);
+        let queued = QueueBytes::default();
+        app.gateway_rx = Some(rx);
+        app.gateway_queued = Some(queued.clone());
+
+        // Handled event, unknown/ignored event, and malformed event: all must release their bytes back to 0.
+        let batch = [
+            ("USER_SETTINGS_UPDATE", serde_json::json!({"locale": "de"}), 4096usize),
+            ("UNHANDLED_FUTURE_EVENT", serde_json::json!({"ignored": true}), 8192usize),
+            ("MESSAGE_CREATE", serde_json::json!({}), 2048usize),
+        ];
+        for (name, payload, bytes) in batch {
+            queued.fetch_add(bytes, Ordering::SeqCst);
+            tx.send(GatewayEvent::NodeDispatch(name.into(), payload, bytes)).unwrap();
+        }
+        assert_eq!(queued.load(Ordering::SeqCst), 4096 + 8192 + 2048);
+        app.process_background_events();
+        assert_eq!(queued.load(Ordering::SeqCst), 0, "counter must return to 0 after draining all hub events");
+        assert_eq!(app.state.user_settings.locale.as_deref(), Some("de"), "sized hub dispatch must still apply");
+
+        // Stream more than HUB_QUEUE_BYTES in total while the UI keeps draining: must complete without stalling.
+        let chunk = 8 << 20;
+        let chunks = (HUB_QUEUE_BYTES / chunk) + 2; // 48 MiB > 32 MiB budget
+        let q_prod = queued.clone();
+        let tx_prod = tx.clone();
+        let producer = std::thread::spawn(move || {
+            for i in 0..chunks {
+                let (actions, sized) = hub_actions(
+                    vec![Action::Dispatch("UNHANDLED_STREAM_EVENT".into(), serde_json::json!({"i": i}))],
+                    chunk,
+                    &q_prod,
+                    Duration::from_secs(2),
+                )?;
+                let n = sized.expect("hub dispatch must carry counted bytes");
+                for a in actions {
+                    if let Action::Dispatch(name, payload) = a {
+                        tx_prod.send(GatewayEvent::NodeDispatch(name, payload, n)).unwrap();
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !producer.is_finished() {
+            assert!(Instant::now() < deadline, "producer stalled instead of draining past HUB_QUEUE_BYTES");
+            app.process_background_events();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        producer.join().unwrap().expect("all chunks beyond HUB_QUEUE_BYTES must pass");
+        app.process_background_events();
+        assert_eq!(queued.load(Ordering::SeqCst), 0, "counter must return to 0 after streaming past budget");
     }
 
     #[test]

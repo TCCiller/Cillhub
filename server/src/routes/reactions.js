@@ -4,7 +4,7 @@ import { P, need, viewersOf, isRestricted } from '../permissions.js';
 import { sendToUsers } from '../gateway.js';
 import { reactionEmoji } from '../message.js';
 import { loadChannel } from './channels.js';
-import { requireUnarchived } from './messages.js';
+import { requireUnarchived, requireDmOpen } from './messages.js';
 import { usableEmoji } from './emojis.js';
 
 const segmenter = new Intl.Segmenter();
@@ -38,6 +38,7 @@ const event = (ch, m, emoji, userId) => ({ user_id: userId, channel_id: ch.id, m
 function add(ctx) {
   const [ch, m, emoji] = load(ctx);
   requireUnarchived(ch);
+  requireDmOpen(ch, ctx.user.id);
   // timed-out and pending members keep READ_MESSAGE_HISTORY but may not react at all
   if (ch.guild_id && isRestricted(ch.guild_id, ctx.user.id)) throw missingPermissions();
   if (!get('SELECT 1 FROM reactions WHERE message_id = ? AND emoji = ?', m.id, emoji)) {
@@ -55,6 +56,7 @@ function add(ctx) {
 function remove(ctx, userId) {
   const [ch, m, emoji] = load(ctx);
   requireUnarchived(ch);
+  requireDmOpen(ch, ctx.user.id);
   if (userId !== ctx.user.id) need(ch.perms, P.MANAGE_MESSAGES);
   if (run('DELETE FROM reactions WHERE message_id = ? AND emoji = ? AND user_id = ?', m.id, emoji, userId).changes) {
     sendToUsers(viewersOf(ch), 'MESSAGE_REACTION_REMOVE', event(ch, m, emoji, userId));

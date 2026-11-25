@@ -287,4 +287,42 @@ class StoreTest {
         s = Reducer.apply(s, "PRESENCE_UPDATE", o("""{"user":{"id":"2"},"status":"offline"}"""))
         assertEquals(listOf("11", "offline"), Sel.channelMembers(s, "10", s.channels["100"]!!).map { it.key })
     }
+
+    @Test fun partnerMessageAckLeavesOwnUnreadAndMentionsIntact() {
+        // Group DM 201 with Bob (2) and Carol (3); Bob sends a message mentioning me (1)
+        val group = o("""{"id":"201","type":3,"name":"Squad","recipients":[{"id":"2","username":"bob"},{"id":"3","username":"carol"}],"last_message_id":"690"}""")
+        s = Reducer.apply(s, "CHANNEL_CREATE", group)
+        s = Reducer.apply(s, "MESSAGE_ACK", o("""{"channel_id":"201","message_id":"690"}"""))
+        s = Reducer.apply(s, "MESSAGE_CREATE", msg("700", "201", "2", ""","mentions":[{"id":"1","username":"me"}]"""))
+        assertTrue("group DM is unread", Sel.isUnread(s, s.channels["201"]!!))
+        assertEquals(1, Sel.mentions(s, "201"))
+
+        // Carol (3) reads the group DM on an older server that still emits MESSAGE_ACK with user_id
+        s = Reducer.apply(s, "MESSAGE_ACK", o("""{"channel_id":"201","message_id":"700","user_id":"3"}"""))
+        assertTrue("partner MESSAGE_ACK must leave channel unread", Sel.isUnread(s, s.channels["201"]!!))
+        assertEquals("partner MESSAGE_ACK must leave mention count intact", 1, Sel.mentions(s, "201"))
+        assertEquals("partner read is recorded", "700", s.dmRecipientReads["201"]?.get("3"))
+
+        // Same ack without user_id (my own read) clears unread and mentions as before
+        s = Reducer.apply(s, "MESSAGE_ACK", o("""{"channel_id":"201","message_id":"700"}"""))
+        assertFalse("own MESSAGE_ACK clears unread", Sel.isUnread(s, s.channels["201"]!!))
+        assertEquals("own MESSAGE_ACK clears mentions", 0, Sel.mentions(s, "201"))
+
+        // Ack with our own user_id also clears unread and mentions
+        s = Reducer.apply(s, "MESSAGE_CREATE", msg("701", "201", "2", ""","mentions":[{"id":"1","username":"me"}]"""))
+        assertTrue(Sel.isUnread(s, s.channels["201"]!!))
+        s = Reducer.apply(s, "MESSAGE_ACK", o("""{"channel_id":"201","message_id":"701","user_id":"1"}"""))
+        assertFalse("own user_id MESSAGE_ACK clears unread", Sel.isUnread(s, s.channels["201"]!!))
+        assertEquals("own user_id MESSAGE_ACK clears mentions", 0, Sel.mentions(s, "201"))
+    }
+
+    @Test fun isOwnMessageAckRule() {
+        assertTrue("missing user_id is own", isOwnMessageAck(null, "1"))
+        assertTrue("empty user_id is own", isOwnMessageAck("", "1"))
+        assertTrue("missing user_id while me is unknown is own", isOwnMessageAck(null, null))
+        assertTrue("matching user_id is own", isOwnMessageAck("1", "1"))
+        assertFalse("another user_id is not own", isOwnMessageAck("2", "1"))
+        assertFalse("named user_id while me is unknown is not own", isOwnMessageAck("2", null))
+        assertFalse("named user_id while me is empty is not own", isOwnMessageAck("2", ""))
+    }
 }

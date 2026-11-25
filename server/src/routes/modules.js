@@ -7,8 +7,8 @@ import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { snowflake } from '../snowflake.js';
 import { get, all, run, tx, isMember, userById, userObj } from '../db.js';
-import { HttpError, invalid, notFound, missingAccess, bool, snowflakes, intParam, idParam, rateLimited, str } from '../errors.js';
-import { channelPerms, guildPerms, P, has as hasBits } from '../permissions.js';
+import { HttpError, invalid, notFound, missingAccess, bool, snowflakes, intParam, idParam, rateLimited, str, missingPermissions } from '../errors.js';
+import { channelPerms, guildPerms, isRestricted, P, has as hasBits } from '../permissions.js';
 import { requireMfa } from '../mfa.js';
 import { saveImage, removeImage } from '../files.js';
 import { APP_FLAGS } from '../intents.js';
@@ -308,6 +308,7 @@ async function uiRequest(ctx) {
   if (!panel) throw invalid('panel_id', 'BASE_TYPE_INVALID', 'Unknown panel.');
   const g = String(body.guild_id ?? '');
   if (!mod.enabled || !inScope(mod, g) || !isMember(g, mod.app_id) || !isMember(g, user.id)) throw missingAccess();
+  if (isRestricted(g, user.id)) throw missingPermissions();
   let ch = null;
   if (body.channel_id != null) {
     ch = get('SELECT * FROM channels WHERE id = ? AND guild_id = ?', String(body.channel_id), g);

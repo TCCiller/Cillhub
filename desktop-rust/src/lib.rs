@@ -203,6 +203,177 @@ mod tests {
         }
     }
 
+    #[test]
+    fn installer_removes_legacy_2_2_x_before_writing_files() {
+        let script = include_str!("../installer.nsi");
+        assert!(
+            !script.contains("MAINBINARYNAME"),
+            "installer.nsi must not reference undefined MAINBINARYNAME"
+        );
+        assert!(
+            !script.contains("LegacyRemovalTimedOut"),
+            "installer.nsi must not mention LegacyRemovalTimedOut"
+        );
+        assert!(
+            !script.lines().any(|l| {
+                let t = l.trim();
+                !t.starts_with(';') && t.contains("ExecWait")
+            }),
+            "installer.nsi must not contain ExecWait"
+        );
+
+        let install = script
+            .split("Section \"Install\"")
+            .nth(1)
+            .and_then(|s| s.split("SectionEnd").next())
+            .expect("installer.nsi must have an Install section");
+        let lines: Vec<&str> = install.lines().map(str::trim).collect();
+        let is_code = |l: &&str| !l.is_empty() && !l.starts_with(';');
+
+        assert!(
+            !lines.iter().any(|l| is_code(l) && (*l == "Abort" || l.starts_with("Abort "))),
+            "Install section must not contain Abort"
+        );
+        assert!(
+            !lines.iter().any(|l| is_code(l) && l.starts_with("MessageBox ")),
+            "Install section must not contain MessageBox"
+        );
+
+        // The only process starts in the Install section are the two taskkill lines and launching our own app after --force-run.
+        let force_run = lines
+            .iter()
+            .position(|l| is_code(&l) && l.contains("--force-run"))
+            .expect("Install section must keep --force-run handling");
+        let mut taskkill_count = 0usize;
+        let mut app_launch_count = 0usize;
+        for (i, l) in lines.iter().enumerate() {
+            if !is_code(l) {
+                continue;
+            }
+            if l.starts_with("nsExec::") {
+                assert!(
+                    l.contains("taskkill.exe"),
+                    "unexpected nsExec call in Install section: {l}"
+                );
+                taskkill_count += 1;
+            } else if l.starts_with("Exec ") || l.starts_with("ExecShell") {
+                assert_eq!(
+                    *l, r#"Exec '"$INSTDIR\${PRODUCT_EXE}"'"#,
+                    "unexpected Exec in Install section: {l}"
+                );
+                assert!(i > force_run, "app Exec must follow --force-run");
+                app_launch_count += 1;
+            }
+        }
+        assert_eq!(taskkill_count, 2, "expected exactly two taskkill calls");
+        assert_eq!(app_launch_count, 1, "expected exactly one --force-run app launch");
+
+        let last_taskkill = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| is_code(l) && l.contains("taskkill"))
+            .map(|(i, _)| i)
+            .last()
+            .expect("Install section must have taskkill lines");
+        let first_set_out_path = lines
+            .iter()
+            .position(|l| is_code(&l) && l.starts_with("SetOutPath "))
+            .expect("Install section must have SetOutPath");
+        let first_file = lines
+            .iter()
+            .position(|l| is_code(&l) && l.starts_with("File "))
+            .expect("Install section must have File");
+
+        let legacy_key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\59cd2796-830e-5e8c-88dd-c707d7eebc0a";
+        let expected_del_key = format!(r#"DeleteRegKey HKCU "{legacy_key}""#);
+        let expected_del_file = r#"Delete "$INSTDIR\Uninstall Cillhub.exe""#;
+
+        // Exactly one DeleteRegKey in the Install section, naming only the legacy HKCU key.
+        let delete_keys: Vec<(usize, &&str)> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| is_code(l) && l.starts_with("DeleteRegKey "))
+            .collect();
+        assert_eq!(
+            delete_keys.len(),
+            1,
+            "Install section must have exactly one DeleteRegKey, found {}",
+            delete_keys.len()
+        );
+        let (del_key_idx, del_key_line) = delete_keys[0];
+        assert_eq!(*del_key_line, expected_del_key);
+
+        let read_reg = lines
+            .iter()
+            .position(|l| {
+                is_code(&l)
+                    && l.starts_with("ReadRegStr ")
+                    && l.contains("HKCU")
+                    && l.contains(legacy_key)
+                    && l.contains("\"QuietUninstallString\"")
+            })
+            .expect("Install section must read QuietUninstallString for legacy 2.2.x key from HKCU");
+
+        let del_file_idx = lines
+            .iter()
+            .position(|l| is_code(&l) && *l == expected_del_file)
+            .expect("Install section must delete $INSTDIR\\Uninstall Cillhub.exe");
+
+        assert!(
+            last_taskkill < read_reg
+                && read_reg < del_key_idx
+                && del_key_idx < first_set_out_path
+                && read_reg < del_file_idx
+                && del_file_idx < first_set_out_path
+                && first_set_out_path < first_file,
+            "legacy cleanup block must sit after taskkill and before SetOutPath / first File"
+        );
+
+        // Between read_reg and del_key_idx, prefix-compare the command with "$INSTDIR\" using StrLen/StrCpy,
+        // and guard both DeleteRegKey and Delete inside that one ${If} ... ${EndIf}.
+        let guard_setup = &lines[read_reg + 1..del_key_idx];
+        assert!(
+            guard_setup.iter().any(|l| is_code(l) && l.contains(r#""$INSTDIR\""#)),
+            "must construct $INSTDIR\\ prefix for comparison"
+        );
+        assert!(
+            guard_setup.iter().any(|l| is_code(l) && l.starts_with("StrLen ")),
+            "must compute $INSTDIR\\ length with StrLen"
+        );
+        assert!(
+            guard_setup.iter().any(|l| is_code(l) && l.starts_with("StrCpy ")),
+            "must slice command prefix with StrCpy"
+        );
+        let compare_if = guard_setup
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, l)| is_code(l) && l.starts_with("${If} ") && l.contains("=="))
+            .map(|(i, _)| read_reg + 1 + i)
+            .expect("DeleteRegKey and Delete must sit inside a prefix equality ${If}");
+        let compare_end = lines
+            .iter()
+            .enumerate()
+            .skip(compare_if + 1)
+            .find(|(_, l)| is_code(l) && **l == "${EndIf}")
+            .map(|(i, _)| i)
+            .expect("prefix equality ${If} must close with ${EndIf}");
+        assert!(
+            compare_if < del_key_idx && del_key_idx < compare_end,
+            "DeleteRegKey must sit inside the $INSTDIR\\ check"
+        );
+        assert!(
+            compare_if < del_file_idx && del_file_idx < compare_end,
+            "Delete of Uninstall Cillhub.exe must sit inside the same $INSTDIR\\ check"
+        );
+
+        let hooks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nsis-hooks.nsh");
+        assert!(
+            !hooks.exists(),
+            "obsolete desktop-rust/nsis-hooks.nsh must be removed"
+        );
+    }
+
     fn cargo_package_version(toml: &str) -> Result<String, String> {
         let mut in_pkg = false;
         for line in toml.lines() {

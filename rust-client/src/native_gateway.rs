@@ -20,7 +20,7 @@ use url::Url;
 #[derive(Debug)]
 pub enum GatewayEvent {
     Dispatch(String, Value),
-    /// A private node's event with the bytes it holds in that node's queue (the UI gives them back on receipt).
+    /// An event with the wire bytes it holds in its connection's queue (the UI gives them back on receipt).
     NodeDispatch(String, Value, usize),
     ConnectionError(String),
     RejectedToken,
@@ -50,6 +50,9 @@ pub enum GatewayCommand {
 pub const EVENT_QUEUE: usize = 10_000;
 /// A private node's queue also holds at most this many bytes of events; the reader waits for the UI meanwhile.
 pub const NODE_QUEUE_BYTES: usize = 32 << 20;
+/// Bounds the queued wire bytes per hub connection; the parsed values take a multiple of that.
+pub const HUB_QUEUE_BYTES: usize = 32 << 20;
+const _: () = assert!(HUB_QUEUE_BYTES >= crate::websocket::MAX_SERVER_FRAME_BYTES);
 /// How long the reader waits for room before it gives the connection up (it reconnects later).
 const NODE_QUEUE_WAIT: Duration = Duration::from_secs(60);
 
@@ -66,8 +69,22 @@ pub const NODE_EVENTS: &[&str] = &[
     "STAGE_INSTANCE_DELETE", "CHANNEL_CANVAS_UPDATE",
 ];
 
-/// The bytes a node's events hold in its queue (shared by the reader and the UI).
+/// The bytes a connection's events hold in its queue (shared by the reader and the UI).
 pub type QueueBytes = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+
+/// Gives back `bytes` accounted against `queued` when the UI takes a sized dispatch from the queue.
+pub fn release_queue_bytes(queued: &QueueBytes, bytes: usize) {
+    use std::sync::atomic::Ordering;
+    let mut cur = queued.load(Ordering::SeqCst);
+    while let Err(next) = queued.compare_exchange_weak(
+        cur,
+        cur.saturating_sub(bytes),
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        cur = next;
+    }
+}
 
 pub fn spawn(origin: Url, token: String, sender: SyncSender<GatewayEvent>) -> thread::JoinHandle<()> {
     let (_cmd_tx, cmd_rx) = mpsc::channel();
@@ -80,13 +97,24 @@ pub fn spawn_with_commands(
     sender: SyncSender<GatewayEvent>,
     commands: Receiver<GatewayCommand>,
 ) -> thread::JoinHandle<()> {
-    spawn_inner(origin, token, sender, commands, None)
+    spawn_inner(origin, token, sender, commands, false, None)
+}
+
+/// The hub's gateway with wire-byte queue accounting (`queued`, bounded by HUB_QUEUE_BYTES) and no node event filter.
+pub fn spawn_hub(
+    origin: Url,
+    token: String,
+    sender: SyncSender<GatewayEvent>,
+    commands: Receiver<GatewayCommand>,
+    queued: QueueBytes,
+) -> thread::JoinHandle<()> {
+    spawn_inner(origin, token, sender, commands, false, Some(queued))
 }
 
 /// A private node's gateway: the node names its gateway URL, our node token goes only to the node's own host,
 /// only NODE_EVENTS are queued and its queue holds at most NODE_QUEUE_BYTES (`queued`).
 pub fn spawn_node(origin: Url, token: String, sender: SyncSender<GatewayEvent>, commands: Receiver<GatewayCommand>, queued: QueueBytes) -> thread::JoinHandle<()> {
-    spawn_inner(origin, token, sender, commands, Some(queued))
+    spawn_inner(origin, token, sender, commands, true, Some(queued))
 }
 
 fn spawn_inner(
@@ -94,7 +122,8 @@ fn spawn_inner(
     token: String,
     sender: SyncSender<GatewayEvent>,
     commands: Receiver<GatewayCommand>,
-    node: Option<QueueBytes>,
+    is_node: bool,
+    queued: Option<QueueBytes>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let client = crate::api::no_redirect_client(10);
@@ -113,7 +142,8 @@ fn spawn_inner(
                 &commands,
                 &mut last_presence,
                 &mut outbox,
-                node.as_ref(),
+                is_node,
+                queued.as_ref(),
                 &mut reached_ready,
             );
             match outcome {
@@ -167,10 +197,11 @@ fn run_once(
     commands: &Receiver<GatewayCommand>,
     last_presence: &mut (String, Option<CustomStatus>, Option<GameActivity>),
     outbox: &mut Outbox,
-    node: Option<&QueueBytes>,
+    is_node: bool,
+    queued: Option<&QueueBytes>,
     reached_ready: &mut bool,
 ) -> io::Result<bool> {
-    let pin = node.is_some();
+    let pin = is_node;
     let endpoint = api_url(origin, "/gateway").ok_or_else(|| invalid("Invalid gateway API URL"))?;
     let resp = client
         .get(endpoint)
@@ -216,8 +247,9 @@ fn run_once(
                         last_presence.1.as_ref(),
                         last_presence.2.as_ref(),
                     );
-                    let (actions, sized) = match node {
-                        Some(q) => node_actions(actions, frame.payload.len(), q)?,
+                    let (actions, sized) = match queued {
+                        Some(q) if is_node => node_actions(actions, frame.payload.len(), q)?,
+                        Some(q) => hub_actions(actions, frame.payload.len(), q, NODE_QUEUE_WAIT)?,
                         None => (actions, None),
                     };
                     if !apply_actions(&mut socket, &mut heartbeat, actions, sender, sized)? {
@@ -339,7 +371,7 @@ fn apply_actions(
     heartbeat: &mut Option<(Duration, Instant)>,
     actions: Vec<Action>,
     sender: &SyncSender<GatewayEvent>,
-    sized: Option<usize>,
+    mut sized: Option<usize>,
 ) -> io::Result<bool> {
     for action in actions {
         match action {
@@ -357,7 +389,7 @@ fn apply_actions(
                 return Ok(false);
             }
             Action::Dispatch(name, payload) => {
-                let _ = sender.send(match sized {
+                let _ = sender.send(match sized.take() {
                     Some(n) => GatewayEvent::NodeDispatch(name, payload, n),
                     None => GatewayEvent::Dispatch(name, payload),
                 });
@@ -367,23 +399,53 @@ fn apply_actions(
     Ok(true)
 }
 
-/// A node frame's actions: events not on NODE_EVENTS dropped here, before they are queued; a dispatch waits until
-/// the node's queue has room for its bytes (the frame size), then counts them. Err when no room comes.
-fn node_actions(actions: Vec<Action>, bytes: usize, queued: &QueueBytes) -> io::Result<(Vec<Action>, Option<usize>)> {
+/// Shared wire-byte queue accounting for hub and node readers: filters to NODE_EVENTS when `filter_node` is set,
+/// then waits until `queued + bytes <= limit` (up to `wait`) and counts `bytes`. Err when no room comes.
+fn queue_actions(
+    actions: Vec<Action>,
+    bytes: usize,
+    queued: &QueueBytes,
+    filter_node: bool,
+    limit: usize,
+    wait: Duration,
+) -> io::Result<(Vec<Action>, Option<usize>)> {
     use std::sync::atomic::Ordering;
-    let actions: Vec<Action> = actions.into_iter().filter(|a| !matches!(a, Action::Dispatch(n, _) if !NODE_EVENTS.contains(&n.as_str()))).collect();
+    let actions: Vec<Action> = if filter_node {
+        actions.into_iter().filter(|a| !matches!(a, Action::Dispatch(n, _) if !NODE_EVENTS.contains(&n.as_str()))).collect()
+    } else {
+        actions
+    };
     if !actions.iter().any(|a| matches!(a, Action::Dispatch(..))) {
         return Ok((actions, None));
     }
     let since = Instant::now();
-    while queued.load(Ordering::SeqCst) + bytes > NODE_QUEUE_BYTES {
-        if since.elapsed() > NODE_QUEUE_WAIT {
-            return Err(invalid("The node sends faster than this app can take"));
+    while queued.load(Ordering::SeqCst).saturating_add(bytes) > limit {
+        if since.elapsed() > wait {
+            return Err(invalid(if filter_node {
+                "The node sends faster than this app can take"
+            } else {
+                "The server sends faster than this app can take"
+            }));
         }
         thread::sleep(Duration::from_millis(10));
     }
     queued.fetch_add(bytes, Ordering::SeqCst);
     Ok((actions, Some(bytes)))
+}
+
+/// A node frame's actions: events not on NODE_EVENTS dropped here, before they are queued; a dispatch waits until
+/// the node's queue has room for its bytes (the frame size), then counts them. Err when no room comes.
+fn node_actions(actions: Vec<Action>, bytes: usize, queued: &QueueBytes) -> io::Result<(Vec<Action>, Option<usize>)> {
+    queue_actions(actions, bytes, queued, true, NODE_QUEUE_BYTES, NODE_QUEUE_WAIT)
+}
+
+pub(crate) fn hub_actions(
+    actions: Vec<Action>,
+    bytes: usize,
+    queued: &QueueBytes,
+    wait: Duration,
+) -> io::Result<(Vec<Action>, Option<usize>)> {
+    queue_actions(actions, bytes, queued, false, HUB_QUEUE_BYTES, wait)
 }
 
 /// A node's gateway must be on the node's own host and port: wss, or ws only for an http loopback node.
@@ -426,6 +488,37 @@ mod tests {
         q.store(0, Ordering::SeqCst); // the UI took them
         assert_eq!(waiter.join().unwrap().unwrap(), Some(100));
         assert!(t.elapsed() >= Duration::from_millis(50), "it waited for room");
+    }
+
+    #[test]
+    fn hub_frames_are_not_filtered_and_are_bounded_in_bytes() {
+        use std::sync::atomic::Ordering;
+        assert!(HUB_QUEUE_BYTES >= crate::websocket::MAX_SERVER_FRAME_BYTES);
+        let q = QueueBytes::default();
+        let ev = |n: &str| vec![Action::Dispatch(n.into(), serde_json::json!({}))];
+
+        // Hub keeps account-wide events that NODE_EVENTS filters out, and accounts their wire bytes.
+        assert!(!NODE_EVENTS.contains(&"USER_SETTINGS_UPDATE"));
+        let (kept, sized) = hub_actions(ev("USER_SETTINGS_UPDATE"), 100, &q, Duration::from_secs(1)).unwrap();
+        assert_eq!((kept.len(), sized, q.load(Ordering::SeqCst)), (1, Some(100), 100));
+
+        // When at budget, the reader waits and proceeds once the UI releases bytes.
+        q.store(HUB_QUEUE_BYTES, Ordering::SeqCst);
+        let t = Instant::now();
+        let waiter = std::thread::spawn({
+            let q = q.clone();
+            move || hub_actions(ev("USER_SETTINGS_UPDATE"), 100, &q, Duration::from_secs(2)).map(|(_, s)| s)
+        });
+        std::thread::sleep(Duration::from_millis(40));
+        release_queue_bytes(&q, 100);
+        assert_eq!(waiter.join().unwrap().unwrap(), Some(100));
+        assert!(t.elapsed() >= Duration::from_millis(40), "hub reader waited for room");
+        assert_eq!(q.load(Ordering::SeqCst), HUB_QUEUE_BYTES);
+
+        // When no room arrives before the wait expires, it returns an error without incrementing the counter.
+        let err = hub_actions(ev("MESSAGE_CREATE"), 100, &q, Duration::from_millis(30));
+        assert!(err.is_err(), "full hub queue must error after wait expires");
+        assert_eq!(q.load(Ordering::SeqCst), HUB_QUEUE_BYTES, "rejected frame must not leak bytes");
     }
 
     #[test]

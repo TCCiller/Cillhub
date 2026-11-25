@@ -113,6 +113,56 @@ test('Task 6.4: DM read indicators (CHANNEL_RECIPIENT_ACK)', async () => {
   await api('PATCH', '/users/@me/settings', alice.token, { privacy: { dm_read_receipts: true } });
 });
 
+test('DM and group DM acks send CHANNEL_RECIPIENT_ACK to partners and MESSAGE_ACK only to the reader', async () => {
+  const carolGw = await srv.gateway(carol.token);
+  // 1:1 DM: Bob posts, Alice acks -> Bob gets CHANNEL_RECIPIENT_ACK only (no MESSAGE_ACK); Alice gets MESSAGE_ACK without user_id
+  const dm = (await api('POST', '/users/@me/channels', alice.token, { recipient_id: bob.id })).body;
+  const dmMsg = (await api('POST', `/channels/${dm.id}/messages`, bob.token, { content: 'dm ping' })).body;
+
+  const bobReceiptP = bob.gw.event('CHANNEL_RECIPIENT_ACK', d => d.channel_id === dm.id && d.message_id === dmMsg.id);
+  const bobNoMsgAckP = bob.gw.none(f => f.t === 'MESSAGE_ACK' && f.d?.channel_id === dm.id, 300);
+  const aliceOwnAckP = alice.gw.event('MESSAGE_ACK', d => d.channel_id === dm.id && d.message_id === dmMsg.id);
+  assert.equal((await api('POST', `/channels/${dm.id}/messages/${dmMsg.id}/ack`, alice.token)).status, 200);
+
+  const bobReceipt = await bobReceiptP;
+  assert.equal(bobReceipt.user_id, alice.id);
+  assert.equal(bobReceipt.message_id, dmMsg.id);
+  assert.equal(await bobNoMsgAckP, true, 'DM partner must not receive MESSAGE_ACK');
+  const aliceOwnAck = await aliceOwnAckP;
+  assert.equal(aliceOwnAck.user_id, undefined, 'reader MESSAGE_ACK has no user_id');
+
+  // Group DM with Alice, Bob, Carol: Bob posts, Alice acks -> Bob & Carol get CHANNEL_RECIPIENT_ACK and no MESSAGE_ACK; Alice gets MESSAGE_ACK without user_id
+  for (const u of [bob, carol]) {
+    await api('PUT', `/users/@me/relationships/${u.id}`, alice.token, {});
+    await api('PUT', `/users/@me/relationships/${alice.id}`, u.token, {});
+  }
+  const grp = (await api('POST', '/users/@me/channels', alice.token, { recipients: [bob.id, carol.id], name: 'read-group' })).body;
+  const grpMsg = (await api('POST', `/channels/${grp.id}/messages`, bob.token, { content: 'group ping' })).body;
+
+  const bobGrpReceiptP = bob.gw.event('CHANNEL_RECIPIENT_ACK', d => d.channel_id === grp.id && d.message_id === grpMsg.id);
+  const carolGrpReceiptP = carolGw.event('CHANNEL_RECIPIENT_ACK', d => d.channel_id === grp.id && d.message_id === grpMsg.id);
+  const bobGrpNoMsgAckP = bob.gw.none(f => f.t === 'MESSAGE_ACK' && f.d?.channel_id === grp.id, 300);
+  const carolGrpNoMsgAckP = carolGw.none(f => f.t === 'MESSAGE_ACK' && f.d?.channel_id === grp.id, 300);
+  const aliceGrpOwnAckP = alice.gw.event('MESSAGE_ACK', d => d.channel_id === grp.id && d.message_id === grpMsg.id);
+  assert.equal((await api('POST', `/channels/${grp.id}/messages/${grpMsg.id}/ack`, alice.token)).status, 200);
+
+  assert.equal((await bobGrpReceiptP).user_id, alice.id);
+  assert.equal((await carolGrpReceiptP).user_id, alice.id);
+  assert.equal(await bobGrpNoMsgAckP, true, 'group DM partner Bob must not receive MESSAGE_ACK');
+  assert.equal(await carolGrpNoMsgAckP, true, 'group DM partner Carol must not receive MESSAGE_ACK');
+  assert.equal((await aliceGrpOwnAckP).user_id, undefined, 'reader group DM MESSAGE_ACK has no user_id');
+
+  // With dm_read_receipts turned off, nothing about the read reaches the partner
+  await api('PATCH', '/users/@me/settings', alice.token, { privacy: { dm_read_receipts: false } });
+  const dmMsg2 = (await api('POST', `/channels/${dm.id}/messages`, bob.token, { content: 'dm quiet' })).body;
+  const bobNoReadP = bob.gw.none(f => (f.t === 'CHANNEL_RECIPIENT_ACK' || f.t === 'MESSAGE_ACK') && f.d?.channel_id === dm.id, 300);
+  const aliceOwnAck2P = alice.gw.event('MESSAGE_ACK', d => d.channel_id === dm.id && d.message_id === dmMsg2.id);
+  assert.equal((await api('POST', `/channels/${dm.id}/messages/${dmMsg2.id}/ack`, alice.token)).status, 200);
+  assert.equal(await bobNoReadP, true, 'partner receives no read event when dm_read_receipts is false');
+  assert.equal((await aliceOwnAck2P).user_id, undefined);
+  await api('PATCH', '/users/@me/settings', alice.token, { privacy: { dm_read_receipts: true } });
+});
+
 test('Task 6.6 & 6.16: Polls with anonymous voting, role restrictions, and quiz mode', async () => {
   // 1. Role restricted poll
   const role = (await api('POST', `/guilds/${gid}/roles`, alice.token, { name: 'VIP' })).body;

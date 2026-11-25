@@ -57,6 +57,24 @@ Section "Install" SecInstall
   nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM cillhub.exe'
   Sleep 500
 
+  ; If a 2.2.x install shares $INSTDIR, remove its uninstall entry and uninstaller so running it later cannot wipe the new app.
+  ; We do not start the old uninstaller because it re-runs from a temp copy and cannot be waited on or stopped reliably;
+  ; the old app's other files remain unused in the folder.
+  ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\59cd2796-830e-5e8c-88dd-c707d7eebc0a" "QuietUninstallString"
+  ${If} $R0 != ""
+    StrCpy $R1 $R0 1
+    ${If} $R1 == '"'
+      StrCpy $R0 $R0 "" 1
+    ${EndIf}
+    StrCpy $R1 "$INSTDIR\"
+    StrLen $R2 $R1
+    StrCpy $R0 $R0 $R2
+    ${If} $R0 == $R1
+      DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\59cd2796-830e-5e8c-88dd-c707d7eebc0a"
+      Delete "$INSTDIR\Uninstall Cillhub.exe"
+    ${EndIf}
+  ${EndIf}
+
   SetOutPath "$INSTDIR"
   SetOverwrite on
 

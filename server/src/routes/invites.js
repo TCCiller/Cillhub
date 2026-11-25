@@ -2,10 +2,11 @@ import { randomInt } from 'node:crypto';
 import { snowflake } from '../snowflake.js';
 import { get, all, run, tx, json, isMember, memberIds, memberRow, memberObj, userById, userObj, guildObj, featuresOf } from '../db.js';
 import { HttpError, int, notFound, missingPermissions } from '../errors.js';
-import { P, need, has, guildPerms, visibleChannels, everyoneCanView } from '../permissions.js';
+import { P, need, has, guildPerms, channelPerms, visibleChannels, everyoneCanView } from '../permissions.js';
 import { sendToUsers, statusOf } from '../gateway.js';
 import { loadChannel } from './channels.js';
 import { audit, A } from '../audit.js';
+import { authenticate } from '../auth.js';
 import { loadGuild, guildCreate } from './guilds.js';
 import { welcomeFor, gateEnabled } from './community.js';
 import { getMessage, broadcastMessage } from '../message.js';
@@ -14,7 +15,8 @@ import { recordGuildMetric } from '../analytics.js';
 const invitesPaused = () => new HttpError(403, 0, 'Invites to this server are disabled by the instance administrator.');
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
-function inviteObj(inv) {
+// `seen`: the channel ids the caller can view; a management view leaves the others out
+function inviteObj(inv, seen) {
   const g = get('SELECT * FROM guilds WHERE id = ?', inv.guild_id);
   const ch = get('SELECT * FROM channels WHERE id = ?', inv.channel_id);
   const welcome = welcomeFor(g);
@@ -25,7 +27,7 @@ function inviteObj(inv) {
       vanity_url_code: g.vanity_url_code, ...(welcome && { welcome_screen: welcome }),
       banner: g.banner ?? null, splash: g.splash ?? null, brand_color_primary: json(g.profile, {}).brand_color_primary ?? null, // v6
     },
-    channel: ch && { id: ch.id, name: ch.name, type: ch.type },
+    channel: ch && (!seen || seen.has(ch.id)) ? { id: ch.id, name: ch.name, type: ch.type } : null,
     inviter: inv.inviter_id ? userObj(userById(inv.inviter_id)) : null, uses: inv.uses, max_uses: inv.max_uses, max_age: inv.max_age,
     created_at: inv.created_at, expires_at: inv.expires_at === null ? null : new Date(inv.expires_at).toISOString(),
   };
@@ -44,9 +46,13 @@ function findInvite(code) {
 }
 
 // with_counts=true is the documented opt-in for the member count on an invite preview
-function getInvite({ params, query }) {
+// the channel is named only when everyone could view it, or the caller sends a valid token of someone who can (an open route does not authenticate by itself)
+function getInvite({ params, query, req }) {
   const inv = findInvite(params.code);
-  return query.get('with_counts') === 'true' ? { ...inviteObj(inv), approximate_member_count: memberIds(inv.guild_id).length } : inviteObj(inv);
+  const ch = get('SELECT * FROM channels WHERE id = ?', inv.channel_id);
+  const { user } = authenticate(req.headers.authorization);
+  const seen = new Set(ch && (everyoneCanView(ch) || (user && has(channelPerms(ch, user.id), P.VIEW_CHANNEL))) ? [ch.id] : []);
+  return query.get('with_counts') === 'true' ? { ...inviteObj(inv, seen), approximate_member_count: memberIds(inv.guild_id).length } : inviteObj(inv, seen);
 }
 
 function createInvite(ctx) {
@@ -77,7 +83,7 @@ function revoke(ctx) {
   if (inv.inviter_id !== user.id && !has(guildPerms(inv.guild_id, user.id), P.MANAGE_GUILD)) throw missingPermissions();
   run('DELETE FROM invites WHERE code = ?', inv.code);
   audit(ctx, inv.guild_id, A.INVITE_DELETE, inv.code, { changes: [{ key: 'code', old_value: inv.code }, { key: 'channel_id', old_value: inv.channel_id }] });
-  return inviteObj(inv);
+  return inviteObj(inv, new Set(visibleChannels(inv.guild_id, user.id).map(c => c.id)));
 }
 
 function join({ params, user }) {
@@ -150,10 +156,11 @@ export function addToGuild(g, user, inv = null) {
 
 export default [
   ['POST', '/channels/:id/invites', createInvite],
-  ['GET', '/guilds/:id/invites', ({ params, user }) => all(
-    'SELECT * FROM invites WHERE guild_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at',
-    loadGuild(params.id, user, P.MANAGE_GUILD).id, Date.now(),
-  ).map(inviteObj)],
+  ['GET', '/guilds/:id/invites', ({ params, user }) => {
+    const g = loadGuild(params.id, user, P.MANAGE_GUILD);
+    const seen = new Set(visibleChannels(g.id, user.id).map(c => c.id));
+    return all('SELECT * FROM invites WHERE guild_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at', g.id, Date.now()).map(inv => inviteObj(inv, seen));
+  }],
   ['GET', '/invites/:code', getInvite, { open: true }],
   ['POST', '/invites/:code', join, { userOnly: true }],
   ['DELETE', '/invites/:code', revoke],

@@ -1,14 +1,14 @@
 import { snowflake } from '../snowflake.js';
 import { get, memberIds } from '../db.js';
 import { HttpError, str, int, bool, isoTime, snowflakeField, notFound, missingPermissions } from '../errors.js';
-import { P, has, need, channelPerms, requireAbove, viewersOf } from '../permissions.js';
+import { P, has, need, channelPerms, guildPerms, requireAbove, viewersOf } from '../permissions.js';
 import { sendToUsers, guildParts } from '../gateway.js';
 import { audit, A, diff } from '../audit.js';
 import { voiceState, voiceStateObj, statesIn, setStageState, leaveHooks } from '../voice.js';
 import { getChannel } from '../message.js';
 import { loadChannel } from './channels.js';
 import { loadGuild } from './guilds.js';
-import { setEventStatus } from './events.js';
+import { setEventStatus, canSee, getEvent } from './events.js';
 
 // live stages: channel id -> instance. In memory like voice states: a stage closes when its last listener leaves.
 const instances = new Map();
@@ -42,6 +42,12 @@ function loadInstance(ctx) {
 const privacy = body => (body.privacy_level === undefined ? 2 : int(body, 'privacy_level', 2, 2));
 const announce = (inst, t) => { const ch = getChannel(inst.channel_id); sendToUsers(ch ? viewersOf(ch) : memberIds(inst.guild_id), t, inst); };
 
+// linking a stage to an event drives its status, so it takes what editing the event takes; a hidden event answers like a forbidden one
+function needEvent(user, eventId) {
+  const e = getEvent(eventId);
+  if (!has(guildPerms(e?.guild_id ?? '', user.id), P.MANAGE_EVENTS) || !canSee(e, user.id)) throw missingPermissions();
+}
+
 function close(ctx, inst) {
   instances.delete(inst.channel_id);
   announce(inst, 'STAGE_INSTANCE_DELETE');
@@ -61,7 +67,8 @@ function create(ctx) {
   need(ch.perms, MODERATOR);
   if (instances.has(ch.id)) throw new HttpError(400, 150006, 'A stage instance already exists for this channel');
   const eventId = body.guild_scheduled_event_id == null ? null : snowflakeField(body, 'guild_scheduled_event_id');
-  if (eventId && !get('SELECT 1 FROM scheduled_events WHERE id = ? AND guild_id = ?', eventId, ch.guild_id)) throw notFound(10070, 'Guild Scheduled Event');
+  if (eventId && !get('SELECT 1 FROM scheduled_events WHERE id = ? AND guild_id = ?', eventId, ch.guild_id)) throw missingPermissions();
+  if (eventId) needEvent(ctx.user, eventId);
   const inst = {
     id: snowflake(), guild_id: ch.guild_id, channel_id: ch.id, topic: str(body, 'topic', 1, 120), privacy_level: privacy(body),
     discoverable_disabled: true, guild_scheduled_event_id: eventId,
@@ -88,6 +95,8 @@ function update(ctx) {
 function remove(ctx) {
   const [ch, inst] = loadInstance(ctx);
   need(ch.perms, MODERATOR);
+  // a deleted event has nothing left to protect, so the stage must stay closable
+  if (getEvent(inst.guild_scheduled_event_id)) needEvent(ctx.user, inst.guild_scheduled_event_id);
   close(ctx, inst);
 }
 

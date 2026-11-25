@@ -155,3 +155,103 @@ test('auto-archive is computed from the database: an idle thread archives on the
   assert.equal(ch.thread_metadata.archived, true);
   api = srv.api;
 });
+
+test('a member in timeout keeps no creator rights over their own threads and posts until the timeout ends', async () => {
+  const dee = await srv.register('dee');
+  assert.equal((await api('POST', `/invites/${g.invite.code}`, dee.token)).status, 200);
+  const G = g.guild.id;
+  const mod = (await api('POST', `/guilds/${G}/roles`, alice.token, { name: 'thread-mod', permissions: bits(34) })).body;
+  await api('PATCH', `/guilds/${G}/members/${carol.id}`, alice.token, { roles: [mod.id] });
+  const forum = (await api('POST', `/guilds/${G}/channels`, alice.token, { name: 'Ideas', type: 15, available_tags: [{ name: 'bug' }, { name: 'idea' }] })).body;
+  const [bug, idea] = forum.available_tags;
+  const pub = (await api('POST', `/channels/${g.general.id}/threads`, dee.token, { name: 'pub', type: 11 })).body;
+  const priv = (await api('POST', `/channels/${g.general.id}/threads`, dee.token, { name: 'priv', type: 12, invitable: true })).body;
+  assert.equal((await api('PUT', `/channels/${priv.id}/thread-members/${bob.id}`, dee.token)).status, 204);
+  const post = (await api('POST', `/channels/${forum.id}/threads`, dee.token, { name: 'Post', applied_tags: [bug.id], message: { content: 'first' } })).body;
+  const timeout = until => api('PATCH', `/guilds/${G}/members/${dee.id}`, alice.token, { communication_disabled_until: until });
+  const thread = async id => (await api('GET', `/channels/${id}`, alice.token)).body;
+  const tries = () => [
+    ['PATCH', `/channels/${pub.id}`, { name: 'renamed' }],
+    ['PATCH', `/channels/${pub.id}`, { auto_archive_duration: 1440 }],
+    ['PATCH', `/channels/${priv.id}`, { invitable: false }],
+    ['DELETE', `/channels/${priv.id}/thread-members/${bob.id}`],
+    ['PATCH', `/channels/${post.id}`, { applied_tags: [idea.id] }],
+    ['PATCH', `/channels/${post.id}`, { solved_message_id: post.id }],
+    ['PATCH', `/channels/${pub.id}`, { archived: true }],
+  ];
+  const snapshot = async () => JSON.stringify([await thread(pub.id), await thread(priv.id), await thread(post.id), (await api('GET', `/channels/${priv.id}/thread-members`, alice.token)).body.map(m => m.user_id).sort()]);
+  const gw = await srv.gateway(alice.token);
+  const before = await snapshot();
+
+  assert.equal((await timeout(new Date(Date.now() + 3_600_000).toISOString())).status, 200);
+  for (const [m, path, body] of tries()) {
+    const r = await api(m, path, dee.token, body);
+    assert.equal(r.status, 403, `${m} ${path} ${JSON.stringify(body)}`);
+    assert.equal(r.body.code, 50013);
+  }
+  assert.equal(await snapshot(), before, 'nothing changed');
+  assert.ok(await gw.none(f => ['THREAD_UPDATE', 'THREAD_MEMBERS_UPDATE', 'THREAD_MEMBER_UPDATE'].includes(f.t)), 'no event');
+  // a moderator and the owner are unaffected, and the member can still leave
+  assert.equal((await api('PATCH', `/channels/${pub.id}`, carol.token, { name: 'by mod' })).status, 200);
+  assert.equal((await api('PATCH', `/channels/${pub.id}`, alice.token, { name: 'pub' })).status, 200);
+  assert.equal((await api('DELETE', `/channels/${priv.id}/thread-members/${bob.id}`, carol.token)).status, 204);
+  assert.equal((await api('PUT', `/channels/${priv.id}/thread-members/${bob.id}`, alice.token)).status, 204);
+  assert.equal((await api('DELETE', `/channels/${pub.id}/thread-members/@me`, dee.token)).status, 204);
+
+  // lifted: the same requests work
+  assert.equal((await timeout(null)).status, 200);
+  for (const [m, path, body] of tries()) {
+    const r = await api(m, path, dee.token, body);
+    assert.ok(r.status < 300, `${m} ${path} ${JSON.stringify(body)} after the timeout: ${r.status} ${JSON.stringify(r.body)}`);
+  }
+  gw.ws.close();
+});
+
+test('a member in timeout cannot edit their own messages, join a thread or mark interest in an event; leaving and deleting stay open', async () => {
+  const gus = await srv.register('gus');
+  assert.equal((await api('POST', `/invites/${g.invite.code}`, gus.token)).status, 200);
+  const G = g.guild.id;
+  const say = (ch, content, who = gus) => api('POST', `/channels/${ch}/messages`, who.token, { content });
+  const msg = (await say(g.general.id, 'first')).body;
+  const doomed = (await say(g.general.id, 'to delete')).body;
+  const dm = (await api('POST', '/users/@me/channels', gus.token, { recipient_id: bob.id })).body;
+  const dmMsg = (await say(dm.id, 'dm text')).body;
+  const thread = (await api('POST', `/channels/${g.general.id}/threads`, alice.token, { name: 'open talk', type: 11 })).body;
+  const start = new Date(Date.now() + 3_600_000).toISOString();
+  const event = (await api('POST', `/guilds/${G}/scheduled-events`, alice.token, {
+    name: 'meetup', entity_type: 3, entity_metadata: { location: 'here' }, privacy_level: 2, scheduled_start_time: start, scheduled_end_time: new Date(Date.now() + 7_200_000).toISOString(),
+  })).body;
+  const joinThread = () => api('PUT', `/channels/${thread.id}/thread-members/@me`, gus.token);
+  const interest = () => api('PUT', `/guilds/${G}/scheduled-events/${event.id}/users/@me`, gus.token);
+  const edit = (id, body) => api('PATCH', `/channels/${g.general.id}/messages/${id}`, gus.token, body);
+  const timeout = until => api('PATCH', `/guilds/${G}/members/${gus.id}`, alice.token, { communication_disabled_until: until });
+  const content = async id => (await api('GET', `/channels/${g.general.id}/messages/${id}`, alice.token)).body.content;
+
+  // joined and interested before the timeout, to leave and withdraw during it
+  assert.equal((await joinThread()).status, 204);
+  assert.ok((await interest()).status < 300);
+  const gw = await srv.gateway(alice.token);
+  assert.equal((await timeout(new Date(Date.now() + 3_600_000).toISOString())).status, 200);
+  for (const [what, r] of [['edit content', await edit(msg.id, { content: 'changed' })], ['edit flags', await edit(msg.id, { flags: 4 })]]) {
+    assert.equal(r.status, 403, what);
+    assert.equal(r.body.code, 50013, what);
+  }
+  assert.equal(await content(msg.id), 'first', 'the text is unchanged');
+  assert.equal((await api('DELETE', `/channels/${thread.id}/thread-members/@me`, gus.token)).status, 204, 'leaving a thread stays open');
+  assert.equal((await api('DELETE', `/guilds/${G}/scheduled-events/${event.id}/users/@me`, gus.token)).status, 204, 'withdrawing interest stays open');
+  for (const r of [await joinThread(), await interest()]) {
+    assert.equal(r.status, 403);
+    assert.equal(r.body.code, 50013);
+  }
+  assert.equal((await api('DELETE', `/channels/${g.general.id}/messages/${doomed.id}`, gus.token)).status, 204, 'deleting an own message stays open');
+  assert.equal((await api('PATCH', `/channels/${dm.id}/messages/${dmMsg.id}`, gus.token, { content: 'dm edited' })).status, 200, 'a DM is not touched by a server timeout');
+  assert.equal((await api('PATCH', `/channels/${g.general.id}/messages/${msg.id}`, alice.token, { flags: 4 })).status, 200, 'the owner moderates their message');
+  assert.ok(await gw.none(f => (f.t === 'MESSAGE_UPDATE' && f.d.id === msg.id && f.d.content === 'changed') || (f.t === 'THREAD_MEMBERS_UPDATE' && f.d.added_members?.length) || f.t === 'GUILD_SCHEDULED_EVENT_USER_ADD'), 'nothing was sent');
+
+  assert.equal((await timeout(null)).status, 200);
+  assert.equal((await edit(msg.id, { content: 'changed' })).status, 200);
+  assert.equal(await content(msg.id), 'changed');
+  assert.equal((await joinThread()).status, 204);
+  assert.ok((await interest()).status < 300);
+  gw.ws.close();
+});

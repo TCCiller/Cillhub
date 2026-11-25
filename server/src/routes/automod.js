@@ -1,7 +1,7 @@
 import { snowflake } from '../snowflake.js';
 import { get, all, run, json } from '../db.js';
 import { HttpError, str, int, bool, invalid, snowflakes } from '../errors.js';
-import { P, holders } from '../permissions.js';
+import { P, need, holders } from '../permissions.js';
 import { sendToUsers } from '../gateway.js';
 import { audit, A, diff } from '../audit.js';
 import { patternProblem } from '../automod.js';
@@ -37,18 +37,21 @@ function metadata(type, meta = {}) {
   return { keyword_filter: strings(meta, 'keyword_filter', 1000, 60), regex_patterns, allow_list: strings(meta, 'allow_list', 100, 60) };
 }
 
-function actions(value, guildId, trigger) {
+function actions(value, g, trigger) {
   if (!Array.isArray(value) || !value.length || value.length > 5) throw invalid('actions', 'BASE_TYPE_BAD_LENGTH', 'Between 1 and 5 actions.');
   return value.map(a => {
     const m = a?.metadata ?? {};
     if (a?.type === 1) return { type: 1, metadata: { custom_message: m.custom_message == null ? null : str(m, 'custom_message', 0, 150) } };
     if (a?.type === 2) {
-      if (!get('SELECT 1 FROM channels WHERE id = ? AND guild_id = ? AND type IN (0, 5)', String(m.channel_id), guildId)) {
+      if (!get('SELECT 1 FROM channels WHERE id = ? AND guild_id = ? AND type IN (0, 5)', String(m.channel_id), g.id)) {
         throw invalid('actions', 'AUTO_MODERATION_INVALID_CHANNEL', 'Alerts go to a text channel of this guild.');
       }
       return { type: 2, metadata: { channel_id: String(m.channel_id) } };
     }
-    if (a?.type === 3 && trigger !== 6) return { type: 3, metadata: { duration_seconds: int(m, 'duration_seconds', 1, 2419200) } };
+    if (a?.type === 3 && trigger !== 6) {
+      need(g.perms, P.MODERATE_MEMBERS);
+      return { type: 3, metadata: { duration_seconds: int(m, 'duration_seconds', 1, 2419200) } };
+    }
     throw invalid('actions', 'BASE_TYPE_CHOICES', 'Action type must be 1 (block), 2 (alert) or 3 (timeout).');
   });
 }
@@ -56,6 +59,7 @@ function actions(value, guildId, trigger) {
 function fields(body, g, current) {
   const trigger = current?.trigger_type ?? body.trigger_type;
   if (!Object.hasOwn(TRIGGERS, trigger)) throw invalid('trigger_type', 'BASE_TYPE_CHOICES', 'Supported trigger types: 1 (keyword), 5 (mention spam), 6 (member profile).');
+  if (body.actions === undefined && current && json(current.actions, []).some(a => a?.type === 3)) need(g.perms, P.MODERATE_MEMBERS);
   const out = {};
   const set = (k, fn) => { if (body[k] !== undefined || !current) out[k] = fn(); };
   set('name', () => str(body, 'name', 1, 100));
@@ -65,7 +69,7 @@ function fields(body, g, current) {
     return e;
   });
   set('trigger_metadata', () => JSON.stringify(metadata(trigger, body.trigger_metadata)));
-  set('actions', () => JSON.stringify(actions(body.actions, g.id, trigger)));
+  set('actions', () => JSON.stringify(actions(body.actions, g, trigger)));
   set('enabled', () => Number(body.enabled === undefined ? false : bool(body, 'enabled')));
   set('exempt_roles', () => JSON.stringify(body.exempt_roles == null ? [] : snowflakes(body, 'exempt_roles', 20)));
   set('exempt_channels', () => JSON.stringify(body.exempt_channels == null ? [] : snowflakes(body, 'exempt_channels', 50)));

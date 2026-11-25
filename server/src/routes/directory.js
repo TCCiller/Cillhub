@@ -127,15 +127,17 @@ function browse({ query }) {
 // both roles, so a node's own Server Directory settings page gets the same list
 const categories = () => CATEGORIES.map(id => ({ id: categoryId(id), name: CATEGORY_NAMES[id], is_primary: true }));
 
-// a listing by guild id (hub servers first; node guild ids are another instance's snowflakes)
-const entryOf = (guildId, extra = '') => get(`SELECT d.* FROM directory_entries d WHERE d.guild_id = ? ${extra} ORDER BY d.node_id = '' DESC LIMIT 1`, guildId);
+// a listing by guild id. node_id (the listing's node, '' for a hub server) selects the exact row; without it hub servers come
+// first, then the oldest claim, so a node that later claims the same guild id cannot redirect a caller
+const entryOf = (guildId, nodeId = null) => get(`SELECT d.* FROM directory_entries d WHERE d.guild_id = ? AND (? IS NULL OR d.node_id = ?)
+  ORDER BY d.node_id = '' DESC, d.created_at, d.rowid LIMIT 1`, guildId, nodeId, nodeId);
 
 // POST /discoverable-guilds/:guild_id/report {reason, note?}: reason is one of the message report reasons, or free text
 // (kept as the note with reason "other")
 function report(ctx) {
   hubOnly();
-  const d = entryOf(ctx.params.guild_id, `AND ${VISIBLE}`);
-  if (!d) throw notFound(10004, 'Guild');
+  const d = entryOf(ctx.params.guild_id, ctx.query.get('node_id'));
+  if (!d || !get(`SELECT 1 FROM directory_entries d WHERE d.id = ? AND ${VISIBLE}`, d.id)) throw notFound(10004, 'Guild');
   const raw = clean(ctx.body?.reason, 1000);
   if (!raw) throw invalid('reason', 'BASE_TYPE_REQUIRED', 'Say what is wrong with this server.');
   const known = REPORT_REASONS.includes(raw);
@@ -162,15 +164,15 @@ function adminList({ query }) {
   return all(`SELECT d.* FROM directory_entries d WHERE ${where} AND (? = '' OR d.name LIKE ? ESCAPE '\\') ORDER BY d.updated_at DESC LIMIT ?`,
     q, like(q), intParam(query, 'limit', 100, 1, 500)).map(adminEntry);
 }
-function loadEntry(guildId) {
-  const d = entryOf(guildId);
+function loadEntry(ctx) {
+  const d = entryOf(ctx.params.guild_id, ctx.query.get('node_id'));
   if (!d) throw notFound(10004, 'Guild');
   return d;
 }
 // PATCH /admin/directory/:guild_id {hidden, reason?}: hiding survives heartbeats; the owner sees `hidden` in the metadata
 function setHidden(ctx) {
   hubOnly();
-  const d = loadEntry(ctx.params.guild_id);
+  const d = loadEntry(ctx);
   if (typeof ctx.body?.hidden !== 'boolean') throw invalid('hidden', 'BASE_TYPE_BOOLEAN', 'Must be a boolean.');
   const hidden = ctx.body.hidden;
   const s = hidden ? statement(ctx.body) : null; // DSA Art. 17: the owner learns why (hub servers: by DM)
@@ -182,12 +184,12 @@ function setHidden(ctx) {
   const owner = hidden && !d.node_id && get('SELECT owner_id FROM guilds WHERE id = ?', d.guild_id)?.owner_id;
   if (hidden) decide(ctx, { userId: owner || null, action: 'hide_listing', ...s, target: { guild_id: d.guild_id, node_id: d.node_id || null, name: d.name } });
   ctx.audit = { action: hidden ? 'directory.hide' : 'directory.unhide', target_type: 'directory_entry', target_id: d.id, details: { guild_id: d.guild_id, node_id: d.node_id || null, reason: ctx.body.reason ?? null } };
-  return adminEntry(loadEntry(d.guild_id));
+  return adminEntry(get('SELECT * FROM directory_entries WHERE id = ?', d.id));
 }
 // DELETE /admin/directory/:guild_id/reports: dismisses the open reports
 function dismiss(ctx) {
   hubOnly();
-  const d = loadEntry(ctx.params.guild_id);
+  const d = loadEntry(ctx);
   const n = run(`UPDATE directory_reports SET status = 'resolved', action = 'dismiss', resolved_by = ?, resolved_at = ? WHERE entry_id = ? AND status = 'open'`, ctx.user.id, Date.now(), d.id).changes;
   ctx.audit = { action: 'directory.reports.dismiss', target_type: 'directory_entry', target_id: d.id, details: { guild_id: d.guild_id, count: n } };
 }

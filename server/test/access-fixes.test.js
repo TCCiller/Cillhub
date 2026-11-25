@@ -9,7 +9,7 @@ import { startServer, guildWith, bits, until } from './helpers.js';
 import { makeAdmin, install, pkg, logged, totp } from './module-helpers.js';
 
 const SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
-const VIEW = 10, SEND = 11, MANAGE_CHANNELS = 4, MANAGE_WEBHOOKS = 29, MODERATE = 40, ADMIN = 3;
+const VIEW = 10, SEND = 11, MANAGE_CHANNELS = 4, MANAGE_GUILD = 5, MANAGE_MESSAGES = 13, MANAGE_WEBHOOKS = 29, MODERATE = 40, ADMIN = 3;
 let srv, api, g, alex, sam, robin, root;
 const dbRun = (sql, ...args) => { const db = new DatabaseSync(join(srv.dataDir, 'cillcord.sqlite')); try { return db.prepare(sql).run(...args); } finally { db.close(); } };
 const dbGet = (sql, ...args) => { const db = new DatabaseSync(join(srv.dataDir, 'cillcord.sqlite'), { readOnly: true }); try { return db.prepare(sql).get(...args); } finally { db.close(); } };
@@ -57,11 +57,78 @@ test('recurring messages stop when the recipient blocks the author', async () =>
   assert.equal(r.status, 201, JSON.stringify(r.body));
   assert.equal((await api('PUT', `/users/@me/relationships/${sam.id}`, robin.token, { type: 2 })).status, 204);
   dbRun('UPDATE recurring_messages SET next_run = 1 WHERE id = ?', r.body.id);
-  await api('POST', `/channels/${dm.id}/recurring-messages`, sam.token, { content: 'wake', interval_type: 'daily', time_of_day: '23:59' }); // re-arms the timer
+  await api('POST', `/channels/${g.general.id}/recurring-messages`, alex.token, { content: 'wake', interval_type: 'daily', time_of_day: '23:59' }); // re-arms the timer (the blocked DM now refuses new ones)
   await until(() => !!dbGet('SELECT 1 FROM recurring_messages WHERE id = ? AND next_run > 1', r.body.id), 3000); // the job ran
   const msgs = (await api('GET', `/channels/${dm.id}/messages`, sam.token)).body;
   assert.equal(msgs.filter(m => m.content === 'daily ping').length, 0);
   await api('DELETE', `/users/@me/relationships/${sam.id}`, robin.token);
+});
+
+test('recurring message deletion checks author ownership and MANAGE_MESSAGES', async () => {
+  const listed = async (chId, token) => (await api('GET', `/channels/${chId}/recurring-messages`, token)).body;
+
+  // 1:1 DM: only the author can delete their recurring message
+  const dm = (await api('POST', '/users/@me/channels', sam.token, { recipient_id: robin.id })).body;
+  const dmRec = await api('POST', `/channels/${dm.id}/recurring-messages`, sam.token, { content: 'dm note', interval_type: 'daily', time_of_day: '09:00' });
+  assert.equal(dmRec.status, 201);
+  assert.equal((await api('DELETE', `/channels/${dm.id}/recurring-messages/${dmRec.body.id}`, robin.token)).status, 403);
+  assert.ok((await listed(dm.id, sam.token)).some(r => r.id === dmRec.body.id), 'still present after other participant 403');
+  assert.equal((await api('DELETE', `/channels/${dm.id}/recurring-messages/${dmRec.body.id}`, sam.token)).status, 200);
+  assert.ok(!(await listed(dm.id, sam.token)).some(r => r.id === dmRec.body.id), 'removed by author');
+
+  // Group DM with a third participant: neither another participant nor the group owner can delete another author's row
+  for (const u of [sam, robin]) {
+    assert.equal((await api('PUT', `/users/@me/relationships/${u.id}`, alex.token, {})).status, 204);
+    assert.equal((await api('PUT', `/users/@me/relationships/${alex.id}`, u.token, {})).status, 204);
+  }
+  const grp = (await api('POST', '/users/@me/channels', alex.token, { recipients: [sam.id, robin.id], name: 'trio' })).body;
+  const grpRec = await api('POST', `/channels/${grp.id}/recurring-messages`, sam.token, { content: 'group note', interval_type: 'daily', time_of_day: '10:00' });
+  assert.equal(grpRec.status, 201);
+  assert.equal((await api('DELETE', `/channels/${grp.id}/recurring-messages/${grpRec.body.id}`, robin.token)).status, 403);
+  assert.equal((await api('DELETE', `/channels/${grp.id}/recurring-messages/${grpRec.body.id}`, alex.token)).status, 403);
+  assert.ok((await listed(grp.id, sam.token)).some(r => r.id === grpRec.body.id), 'still present in group DM');
+  assert.equal((await api('DELETE', `/channels/${grp.id}/recurring-messages/${grpRec.body.id}`, sam.token)).status, 200);
+  assert.ok(!(await listed(grp.id, sam.token)).some(r => r.id === grpRec.body.id), 'removed by author in group DM');
+
+  // Server: author can delete own row even after losing MANAGE_MESSAGES; others need MANAGE_MESSAGES; wrong channel is 404
+  const ch = (await api('POST', `/guilds/${g.guild.id}/channels`, alex.token, { name: 'recur' })).body;
+  const other = (await api('POST', `/guilds/${g.guild.id}/channels`, alex.token, { name: 'recur-other' })).body;
+  const modRole = (await api('POST', `/guilds/${g.guild.id}/roles`, alex.token, { name: 'msg-mgr', permissions: bits(MANAGE_MESSAGES) })).body;
+  assert.equal((await api('PUT', `/guilds/${g.guild.id}/members/${sam.id}/roles/${modRole.id}`, alex.token)).status, 204);
+
+  const own = await api('POST', `/channels/${ch.id}/recurring-messages`, sam.token, { content: 'sam reminder' });
+  assert.equal(own.status, 201);
+  assert.equal((await api('DELETE', `/guilds/${g.guild.id}/members/${sam.id}/roles/${modRole.id}`, alex.token)).status, 204);
+
+  // Another member without MANAGE_MESSAGES cannot delete Sam's row
+  assert.equal((await api('DELETE', `/channels/${ch.id}/recurring-messages/${own.body.id}`, robin.token)).status, 403);
+  assert.ok((await listed(ch.id, alex.token)).some(r => r.id === own.body.id));
+
+  // Sam lost MANAGE_MESSAGES but can still delete their own row
+  assert.equal((await api('DELETE', `/channels/${ch.id}/recurring-messages/${own.body.id}`, sam.token)).status, 200);
+  assert.ok(!(await listed(ch.id, alex.token)).some(r => r.id === own.body.id));
+
+  // Member with MANAGE_MESSAGES can delete someone else's row; id from another channel gives 404
+  const alexRec = await api('POST', `/channels/${ch.id}/recurring-messages`, alex.token, { content: 'alex reminder' });
+  const otherRec = await api('POST', `/channels/${other.id}/recurring-messages`, alex.token, { content: 'other channel' });
+  assert.equal(alexRec.status, 201);
+  assert.equal(otherRec.status, 201);
+  assert.equal((await api('DELETE', `/channels/${ch.id}/recurring-messages/${alexRec.body.id}`, robin.token)).status, 403);
+  assert.equal((await api('DELETE', `/channels/${ch.id}/recurring-messages/${otherRec.body.id}`, alex.token)).status, 404);
+  assert.equal((await api('DELETE', `/channels/${ch.id}/recurring-messages/${otherRec.body.id}`, robin.token)).status, 404);
+  assert.ok((await listed(other.id, alex.token)).some(r => r.id === otherRec.body.id));
+
+  assert.equal((await api('PUT', `/guilds/${g.guild.id}/members/${sam.id}/roles/${modRole.id}`, alex.token)).status, 204);
+  assert.equal((await api('DELETE', `/channels/${ch.id}/recurring-messages/${alexRec.body.id}`, sam.token)).status, 200);
+  assert.ok(!(await listed(ch.id, alex.token)).some(r => r.id === alexRec.body.id));
+
+  // Caller who cannot view the channel still gets 403 even for their own row
+  const hidden = await api('POST', `/channels/${ch.id}/recurring-messages`, sam.token, { content: 'hidden own' });
+  assert.equal(hidden.status, 201);
+  assert.equal((await api('DELETE', `/guilds/${g.guild.id}/members/${sam.id}/roles/${modRole.id}`, alex.token)).status, 204);
+  await deny(ch.id, sam.id, bits(VIEW));
+  assert.equal((await api('DELETE', `/channels/${ch.id}/recurring-messages/${hidden.body.id}`, sam.token)).status, 403);
+  assert.ok((await listed(ch.id, alex.token)).some(r => r.id === hidden.body.id));
 });
 
 test('bots without message content read no content through pins, search or edit history', async () => {
@@ -183,4 +250,78 @@ test('a vanity link names only a channel everyone can see', async () => {
   await api('PATCH', `/guilds/${own.id}/vanity-url`, alex.token, { code: 'alex-vanity' });
   const inv = (await api('GET', '/invites/alex-vanity')).body;
   assert.equal(inv.channel.id, lobby.id);
+});
+
+test('AutoMod timeout actions require MODERATE_MEMBERS on create and update', async () => {
+  const ag = await guildWith(srv, ['am_owner', 'am_mgr', 'am_mod', 'am_both']);
+  const { am_owner: owner, am_mgr: mgr, am_mod: mod, am_both: both } = ag.users;
+  const gid = ag.guild.id;
+  const give = async (u, name, perms) => {
+    const role = (await api('POST', `/guilds/${gid}/roles`, owner.token, { name, permissions: perms })).body;
+    assert.equal((await api('PUT', `/guilds/${gid}/members/${u.id}/roles/${role.id}`, owner.token)).status, 204);
+    return role;
+  };
+  const mgrRole = await give(mgr, 'mgr', bits(MANAGE_GUILD));
+  await give(mod, 'mod', bits(MODERATE));
+  await give(both, 'both', bits(MANAGE_GUILD, MODERATE));
+
+  const rulesUrl = `/guilds/${gid}/auto-moderation/rules`;
+  const timeoutAction = { type: 3, metadata: { duration_seconds: 60 } };
+
+  // MANAGE_GUILD alone may create non-timeout rules, but not timeout rules (keyword or mention spam, alone or mixed)
+  const blockRule = await api('POST', rulesUrl, mgr.token, {
+    name: 'block-only', trigger_type: 1, trigger_metadata: { keyword_filter: ['nope'] }, actions: [{ type: 1 }], enabled: true,
+  });
+  assert.equal(blockRule.status, 200);
+
+  for (const payload of [
+    { name: 'kw-timeout', trigger_type: 1, trigger_metadata: { keyword_filter: ['bad'] }, actions: [timeoutAction], enabled: true },
+    { name: 'mention-timeout', trigger_type: 5, trigger_metadata: { mention_total_limit: 2 }, actions: [{ type: 1 }, timeoutAction], enabled: true },
+  ]) {
+    const r = await api('POST', rulesUrl, mgr.token, payload);
+    assert.deepEqual([r.status, r.body.code], [403, 50013], payload.name);
+  }
+
+  // MANAGE_GUILD alone cannot PATCH a non-timeout rule to add a timeout action
+  const addTimeout = await api('PATCH', `${rulesUrl}/${blockRule.body.id}`, mgr.token, { actions: [{ type: 1 }, timeoutAction] });
+  assert.deepEqual([addTimeout.status, addTimeout.body.code], [403, 50013]);
+
+  // MANAGE_GUILD alone cannot modify or enable an existing timeout rule while keeping its timeout action
+  const ownerTimeout = await api('POST', rulesUrl, owner.token, {
+    name: 'owner-timeout', trigger_type: 1, trigger_metadata: { keyword_filter: ['rareword'] },
+    actions: [timeoutAction], enabled: false, exempt_roles: [mgrRole.id],
+  });
+  assert.equal(ownerTimeout.status, 200);
+  for (const patch of [
+    { enabled: true },
+    { trigger_metadata: { keyword_filter: ['*'] } },
+    { exempt_roles: [] },
+    { actions: [{ type: 3, metadata: { duration_seconds: 300 } }] },
+  ]) {
+    const r = await api('PATCH', `${rulesUrl}/${ownerTimeout.body.id}`, mgr.token, patch);
+    assert.deepEqual([r.status, r.body.code], [403, 50013], JSON.stringify(patch));
+  }
+  const unchanged = (await api('GET', `${rulesUrl}/${ownerTimeout.body.id}`, owner.token)).body;
+  assert.deepEqual([unchanged.enabled, unchanged.trigger_metadata.keyword_filter, unchanged.exempt_roles], [false, ['rareword'], [mgrRole.id]]);
+
+  // Removing the timeout action via PATCH is allowed for MANAGE_GUILD
+  const stripped = await api('PATCH', `${rulesUrl}/${ownerTimeout.body.id}`, mgr.token, { actions: [{ type: 1 }] });
+  assert.equal(stripped.status, 200);
+  assert.deepEqual(stripped.body.actions.map(a => a.type), [1]);
+
+  // MODERATE_MEMBERS alone still lacks MANAGE_GUILD
+  const modOnly = await api('POST', rulesUrl, mod.token, {
+    name: 'mod-only', trigger_type: 1, trigger_metadata: { keyword_filter: ['bad'] }, actions: [timeoutAction], enabled: true,
+  });
+  assert.deepEqual([modOnly.status, modOnly.body.code], [403, 50013]);
+
+  // MANAGE_GUILD + MODERATE_MEMBERS can create timeout rules, add timeout on PATCH, and edit timeout rules
+  const created = await api('POST', rulesUrl, both.token, {
+    name: 'both-timeout', trigger_type: 1, trigger_metadata: { keyword_filter: ['spam'] }, actions: [timeoutAction], enabled: false,
+  });
+  assert.equal(created.status, 200);
+  assert.equal((await api('PATCH', `${rulesUrl}/${created.body.id}`, both.token, { enabled: true, trigger_metadata: { keyword_filter: ['spam', 'scam'] } })).status, 200);
+  const upgraded = await api('PATCH', `${rulesUrl}/${blockRule.body.id}`, both.token, { actions: [{ type: 1 }, timeoutAction] });
+  assert.equal(upgraded.status, 200);
+  assert.deepEqual(upgraded.body.actions.map(a => a.type), [1, 3]);
 });

@@ -225,6 +225,11 @@ test('UI requests and ui.publish', async () => {
   assert.equal((await ui(bob, { panel_id: 'nope' })).status, 400);
   const stranger = await srv.register('stranger');
   assert.equal((await ui(stranger, {})).status, 403);
+  // a timed-out member may not drive a module panel either
+  const hold = until => api('PATCH', `/guilds/${g.guild.id}/members/${bob.id}`, alice.token, { communication_disabled_until: until });
+  await hold(new Date(Date.now() + 36e5).toISOString());
+  assert.equal((await ui(bob, { channel_id: g.general.id })).status, 403);
+  await hold(null);
   assert.equal((await api('POST', '/modules/kit/ui', null, { panel_id: 'side', guild_id: g.guild.id })).status, 401);
   // an accessory request names a message of the module with that panel
   await new Promise(r => setTimeout(r, 5000 - (Date.now() - lastCard))); // 5 writes per 5 s per channel

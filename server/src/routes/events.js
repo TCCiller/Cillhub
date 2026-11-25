@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { snowflake } from '../snowflake.js';
-import { get, all, run, json, memberIds, memberRow, memberObj, userById, userObj } from '../db.js';
+import { get, all, run, json, isMember, memberIds, memberRow, memberObj, userById, userObj } from '../db.js';
 import { HttpError, str, int, invalid, isoTime, intParam, idParam, snowflakeField, notFound, missingPermissions } from '../errors.js';
-import { P, has, channelPerms, viewersOf } from '../permissions.js';
+import { P, has, channelPerms, viewersOf, isRestricted } from '../permissions.js';
 import { sendToUsers, guildParts } from '../gateway.js';
 import { saveImage, removeImage } from '../files.js';
 import { addJob, schedule } from '../timers.js';
@@ -27,14 +27,17 @@ export function eventObj(e, withCount = true) {
 
 // channel events are only for those who can see the channel
 const audienceOf = e => (e.channel_id && getChannel(e.channel_id) ? viewersOf(getChannel(e.channel_id)) : memberIds(e.guild_id));
-const canSee = (e, userId) => audienceOf(e).includes(userId);
+export const canSee = (e, userId) => {
+  const ch = e.channel_id && getChannel(e.channel_id);
+  return ch ? has(channelPerms(ch, userId), P.VIEW_CHANNEL) : isMember(e.guild_id, userId);
+};
 const announce = (e, t) => sendToUsers(audienceOf(e), t, eventObj(e));
 const visible = (guildId, userId) => all('SELECT * FROM scheduled_events WHERE guild_id = ? AND status IN (1, 2) ORDER BY scheduled_start_time', guildId)
   .filter(e => canSee(e, userId));
 
 guildParts.push((g, userId) => ({ guild_scheduled_events: userId ? visible(g.id, userId).map(e => eventObj(e)) : [] }));
 
-const getEvent = id => get('SELECT * FROM scheduled_events WHERE id = ?', id);
+export const getEvent = id => get('SELECT * FROM scheduled_events WHERE id = ?', id);
 function loadEvent(g, id, userId) {
   const e = get('SELECT * FROM scheduled_events WHERE id = ? AND guild_id = ?', id, g.id);
   if (!e || !canSee(e, userId)) throw notFound(10070, 'Guild Scheduled Event');
@@ -156,6 +159,7 @@ function users(ctx) {
 function subscribe(ctx, on) {
   const g = loadGuild(ctx.params.id, ctx.user);
   const e = loadEvent(g, ctx.params.event_id, ctx.user.id);
+  if (on && isRestricted(g.id, ctx.user.id)) throw missingPermissions(); // withdrawing interest stays open
   const changed = on
     ? run('INSERT OR IGNORE INTO scheduled_event_users (event_id, user_id) VALUES (?, ?)', e.id, ctx.user.id).changes
     : run('DELETE FROM scheduled_event_users WHERE event_id = ? AND user_id = ?', e.id, ctx.user.id).changes;

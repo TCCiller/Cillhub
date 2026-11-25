@@ -9,8 +9,8 @@ import { moderateMessage } from '../automod.js';
 import { messageObj, getChannel, SOURCE_GONE } from '../message.js';
 import { pushTo } from '../push.js';
 import { addJob, schedule } from '../timers.js';
-import { blockedEither } from './relationships.js';
 import { loadChannel } from './channels.js';
+import { requireDmOpen } from './messages.js';
 import { reopened } from './threads.js';
 import { isEncrypted, refused } from '../e2ee.js';
 
@@ -39,7 +39,7 @@ async function checked(ch, user, body) {
   need(ch.perms, P.SEND_MESSAGES);
   if (ch.guild_id) checkVerification(ch.guild_id, user.id);
   checkThreadOpen(ch, ch.perms);
-  if (ch.type === 1 && channelUserIds(ch).some(id => id !== user.id && blockedEither(user.id, id))) throw new HttpError(403, 50007, 'Cannot send messages to this user');
+  requireDmOpen(ch, user.id);
   const d = await prepare({ ch, perms: ch.perms, userId: user.id }, body, []);
   const mod = moderateMessage(ch, user.id, d.content);
   if (mod?.blocked) throw mod.reject();
@@ -262,6 +262,7 @@ async function createRecurring(ctx) {
   const ch = loadChannel(ctx.params.id, ctx.user);
   need(ch.perms, P.SEND_MESSAGES);
   if (ch.guild_id) need(ch.perms, P.MANAGE_MESSAGES);
+  requireDmOpen(ch, ctx.user.id);
   if (isEncrypted(ch)) throw refused('Recurring messages');
   const content = str(ctx.body ?? {}, 'content', 1, 2000);
   const intervalType = ['daily', 'weekly', 'monthly'].includes(ctx.body?.interval_type) ? ctx.body.interval_type : 'daily';
@@ -281,9 +282,9 @@ async function createRecurring(ctx) {
 
 function deleteRecurring(ctx) {
   const ch = loadChannel(ctx.params.id, ctx.user);
-  if (ch.guild_id) need(ch.perms, P.MANAGE_MESSAGES);
   const row = get('SELECT * FROM recurring_messages WHERE id = ? AND channel_id = ?', ctx.params.mid, ch.id);
   if (!row) throw notFound(10008, 'Recurring Message');
+  if (row.author_id !== ctx.user.id) need(ch.perms, P.MANAGE_MESSAGES);
   run('DELETE FROM recurring_messages WHERE id = ?', row.id);
   return { ok: true };
 }

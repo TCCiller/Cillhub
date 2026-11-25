@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { snowflake } from '../snowflake.js';
-import { DATA_DIR, get, all, run, tx, json, userById, userObj, guildObj, guildChannels } from '../db.js';
+import { DATA_DIR, get, all, run, tx, json, userById, userObj, guildObj } from '../db.js';
 import { HttpError, str, int, invalid, notFound } from '../errors.js';
 import { P, parseBits, DEFAULT_PERMISSIONS, visibleChannels } from '../permissions.js';
 import { sendToUsers } from '../gateway.js';
@@ -20,10 +20,11 @@ const EMOJI_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 // --- snapshot ------------------------------------------------------------------------------------------------------
 // the docs' serialized_source_guild: ids are small integers (@everyone is 0), no member overwrites, no managed roles.
 // Cillhub adds forum `flags` per channel and `emojis` ({name, animated, roles, image: data URI}).
-export function serialize(g) {
+export function serialize(g, userId) {
   const roles = all('SELECT * FROM roles WHERE guild_id = ? AND managed = 0 ORDER BY position', g.id);
   const rid = new Map(roles.map((r, i) => [r.id, i]));
-  const chans = guildChannels(g.id);
+  // only what the exporting member can see leaves the server
+  const chans = visibleChannels(g.id, userId);
   const cid = new Map(chans.map((c, i) => [c.id, i + 1]));
   const emojiImage = e => {
     const bytes = readFileSync(join(DATA_DIR, 'emojis', e.id));
@@ -139,12 +140,12 @@ export async function createFromSnapshot(s, name, owner, icon) {
 }
 
 // --- templates -----------------------------------------------------------------------------------------------------
-function templateObj(t, withDirty = false) {
-  const g = withDirty && get('SELECT * FROM guilds WHERE id = ?', t.guild_id);
+function templateObj(t, viewerId) {
+  const g = viewerId && get('SELECT * FROM guilds WHERE id = ?', t.guild_id);
   return {
     code: t.code, name: t.name, description: t.description, usage_count: t.usage_count, creator_id: t.creator_id,
     creator: userObj(userById(t.creator_id)), created_at: t.created_at, updated_at: t.updated_at, source_guild_id: t.guild_id,
-    serialized_source_guild: JSON.parse(t.snapshot), is_dirty: g ? JSON.stringify(serialize(g)) !== t.snapshot : null,
+    serialized_source_guild: JSON.parse(t.snapshot), is_dirty: g ? JSON.stringify(serialize(g, viewerId)) !== t.snapshot : null,
   };
 }
 const byCode = code => {
@@ -170,16 +171,16 @@ function createTemplate(ctx) {
   const now = new Date().toISOString();
   const code = CODE();
   run('INSERT INTO guild_templates (code, guild_id, name, description, creator_id, created_at, updated_at, snapshot) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    code, g.id, m.name, m.description, ctx.user.id, now, now, JSON.stringify(serialize(g)));
+    code, g.id, m.name, m.description, ctx.user.id, now, now, JSON.stringify(serialize(g, ctx.user.id)));
   ctx.status = 201;
-  return templateObj(byCode(code), true);
+  return templateObj(byCode(code), ctx.user.id);
 }
 
 function syncTemplate(ctx) {
   const g = loadGuild(ctx.params.id, ctx.user, P.MANAGE_GUILD);
   const t = guildTemplate(g, ctx.params.code);
-  run('UPDATE guild_templates SET snapshot = ?, updated_at = ? WHERE code = ?', JSON.stringify(serialize(g)), new Date().toISOString(), t.code);
-  return templateObj(byCode(t.code), true);
+  run('UPDATE guild_templates SET snapshot = ?, updated_at = ? WHERE code = ?', JSON.stringify(serialize(g, ctx.user.id)), new Date().toISOString(), t.code);
+  return templateObj(byCode(t.code), ctx.user.id);
 }
 
 function patchTemplate(ctx) {
@@ -187,7 +188,7 @@ function patchTemplate(ctx) {
   const t = guildTemplate(g, ctx.params.code);
   const m = meta(ctx.body ?? {}, t);
   run('UPDATE guild_templates SET name = ?, description = ? WHERE code = ?', m.name, m.description, t.code);
-  return templateObj(byCode(t.code), true);
+  return templateObj(byCode(t.code), ctx.user.id);
 }
 
 function deleteTemplate(ctx) {
@@ -209,7 +210,7 @@ async function useTemplate(ctx) {
 // export: {format, version, exported_at, serialized_source_guild}; it is imported through POST /guilds (routes/guilds.js)
 function exportGuild(ctx) {
   const g = loadGuild(ctx.params.id, ctx.user, P.MANAGE_GUILD);
-  return { format: 'cillcord-guild', version: 1, exported_at: new Date().toISOString(), serialized_source_guild: serialize(g) };
+  return { format: 'cillcord-guild', version: 1, exported_at: new Date().toISOString(), serialized_source_guild: serialize(g, ctx.user.id) };
 }
 
 // --- templates from the other chat app (owner's request): its public template API has the same snapshot shape ---------
@@ -255,7 +256,7 @@ export default [
   ['GET', '/guilds/templates/external/:code', externalTemplate, { userOnly: true }],
   ['GET', '/guilds/templates/:code', ({ params }) => templateObj(byCode(params.code)), { open: true }],
   ['POST', '/guilds/templates/:code', useTemplate, { maxBody: 12 * 1024 * 1024, userOnly: true }],
-  ['GET', '/guilds/:id/templates', ctx => all('SELECT * FROM guild_templates WHERE guild_id = ?', loadGuild(ctx.params.id, ctx.user, P.MANAGE_GUILD).id).map(t => templateObj(t, true))],
+  ['GET', '/guilds/:id/templates', ctx => all('SELECT * FROM guild_templates WHERE guild_id = ?', loadGuild(ctx.params.id, ctx.user, P.MANAGE_GUILD).id).map(t => templateObj(t, ctx.user.id))],
   ['POST', '/guilds/:id/templates', createTemplate],
   ['PUT', '/guilds/:id/templates/:code', syncTemplate],
   ['PATCH', '/guilds/:id/templates/:code', patchTemplate],

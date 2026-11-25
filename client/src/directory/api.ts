@@ -23,7 +23,7 @@ export const LANGUAGES: [string, string][] = [['en-US', 'English'], ['de', 'Deut
 export const categories = () => api<Category[]>('/discovery/categories').catch(() => FALLBACK_CATEGORIES)
 export const search = (q: { query?: string; category_id?: number; locale?: string; offset?: number }) =>
   api<{ guilds: Listing[]; total: number; limit: number; offset: number }>(`/discoverable-guilds${qs({ ...q, limit: 24 })}`)
-export const report = (guildId: string, reason: string) => api(`/discoverable-guilds/${guildId}/report`, { method: 'POST', body: { reason } })
+export const report = (guildId: string, reason: string, nodeId?: string) => api(`/discoverable-guilds/${guildId}/report${qs({ node_id: nodeId })}`, { method: 'POST', body: { reason } })
 /** Join Guild (user docs): a guild payload when newly joined, 204 when already a member. */
 export const joinListed = (guildId: string) => api<import('../types').GuildPayload | undefined>(`/guilds/${guildId}/members/@me`, { method: 'PUT' })
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startServer, guildWith } from './helpers.js';
+import { startServer, guildWith, png } from './helpers.js';
 
 test('member lists and search preserve roles while lists load them in one query', async t => {
   const srv = await startServer();
@@ -56,6 +56,39 @@ test('member lists and search preserve roles while lists load them in one query'
   } finally {
     t.mock.restoreAll();
     db?.close();
+    await srv.stop();
+  }
+});
+
+test('a member in timeout cannot change their server profile, the account profile is untouched, and it works again when the timeout ends', async () => {
+  const srv = await startServer();
+  try {
+    const { guild, users: { alice, bob } } = await guildWith(srv, ['alice', 'bob']);
+    const me = `/guilds/${guild.id}/members/@me`;
+    const img = `data:image/png;base64,${png(16, 16).toString('base64')}`;
+    const edits = [{ nick: 'Bobby' }, { bio: 'hello' }, { avatar: img }, { banner: img }, { display_name_font_id: 3 }, { display_name_colors: [255] }];
+    const member = async () => JSON.stringify((await srv.api('GET', `/guilds/${guild.id}/members/${bob.id}`, alice.token)).body);
+    const timeout = until => srv.api('PATCH', `/guilds/${guild.id}/members/${bob.id}`, alice.token, { communication_disabled_until: until });
+    const gw = await srv.gateway(alice.token);
+    assert.equal((await timeout(new Date(Date.now() + 3_600_000).toISOString())).status, 200);
+    await gw.event('GUILD_MEMBER_UPDATE', d => d.user.id === bob.id);
+    const before = await member();
+    for (const body of edits) {
+      const r = await srv.api('PATCH', me, bob.token, body);
+      assert.equal(r.status, 403, JSON.stringify(body));
+      assert.equal(r.body.code, 50013);
+    }
+    assert.equal(await member(), before, 'nothing changed');
+    assert.ok(await gw.none(f => f.t === 'GUILD_MEMBER_UPDATE'), 'no event');
+    assert.equal((await srv.api('PATCH', '/users/@me', bob.token, { global_name: 'Bobby' })).status, 200, 'the account profile is not a server matter');
+    assert.equal((await srv.api('PATCH', `/guilds/${guild.id}/members/@me`, alice.token, { bio: 'owner' })).status, 200);
+    assert.equal((await timeout(null)).status, 200);
+    for (const body of edits) {
+      const r = await srv.api('PATCH', me, bob.token, body);
+      assert.equal(r.status, 200, `${JSON.stringify(body)} ${JSON.stringify(r.body)}`);
+    }
+    gw.ws.close();
+  } finally {
     await srv.stop();
   }
 });

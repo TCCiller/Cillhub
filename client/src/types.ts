@@ -222,7 +222,7 @@ export type Member = {
 }
 export type Invite = {
   code: string; guild: { id: string; name: string; icon: string | null; member_count?: number; splash?: string | null; brand_color_primary?: string | null; description?: string | null }
-  channel: { id: string; name: string; type: number }; inviter?: User; uses: number
+  channel: { id: string; name: string; type: number } | null; inviter?: User; uses: number
   approximate_member_count?: number; max_age?: number; max_uses?: number; created_at?: string; expires_at?: string | null
 }
 export type Status = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline'

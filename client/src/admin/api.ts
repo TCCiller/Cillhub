@@ -231,8 +231,8 @@ export const getRelease = () => getHubFederation().then((f) => f.release)
 export const putRelease = (version: string, notes: string, mfa?: string) => admin<Release>('/federation/release', { method: 'PUT', body: { version, notes }, headers: elevation(mfa) })
 
 export const listDirectory = (query: string, filter: 'all' | 'reported' | 'hidden') => admin<DirectoryEntry[]>(`/directory${qs({ query, filter })}`)
-export const setListingHidden = (guildId: string, hidden: boolean, why?: Statement) => admin<DirectoryEntry>(`/directory/${guildId}`, { method: 'PATCH', body: { hidden, ...why } })
-export const dismissListingReports = (guildId: string) => admin<void>(`/directory/${guildId}/reports`, { method: 'DELETE' })
+export const setListingHidden = (guildId: string, hidden: boolean, why?: Statement, nodeId?: string) => admin<DirectoryEntry>(`/directory/${guildId}${qs({ node_id: nodeId })}`, { method: 'PATCH', body: { hidden, ...why } })
+export const dismissListingReports = (guildId: string, nodeId?: string) => admin<void>(`/directory/${guildId}/reports${qs({ node_id: nodeId })}`, { method: 'DELETE' })
 
 export const getFederation = () => admin<Federation>('/federation')
 export const patchFederation = (patch: Partial<Pick<Federation, 'sign_in' | 'update_check'>>) => admin<Federation>('/federation', { method: 'PATCH', body: patch })

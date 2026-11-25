@@ -3,7 +3,7 @@ import { str, invalid } from '../errors.js';
 import { P, need, viewersOf, isThread } from '../permissions.js';
 import { sendToUsers } from '../gateway.js';
 import { loadChannel } from './channels.js';
-import { requireUnarchived } from './messages.js';
+import { requireUnarchived, requireDmOpen } from './messages.js';
 
 function getCanvas(ctx) {
   const ch = loadChannel(ctx.params.id, ctx.user);
@@ -29,6 +29,7 @@ function getCanvas(ctx) {
 function putCanvas(ctx) {
   const ch = loadChannel(ctx.params.id, ctx.user);
   requireUnarchived(ch);
+  requireDmOpen(ch, ctx.user.id);
   if (ch.guild_id) {
     need(ch.perms, isThread(ch) ? P.SEND_MESSAGES_IN_THREADS : P.SEND_MESSAGES);
   }
@@ -77,6 +78,7 @@ function getWhiteboard(ctx) {
 function postWhiteboardStroke(ctx) {
   const ch = loadChannel(ctx.params.id, ctx.user);
   requireUnarchived(ch);
+  requireDmOpen(ch, ctx.user.id);
   if (ch.guild_id) {
     need(ch.perms, isThread(ch) ? P.SEND_MESSAGES_IN_THREADS : P.SEND_MESSAGES);
   }
@@ -114,6 +116,7 @@ function postWhiteboardStroke(ctx) {
 
 function clearWhiteboard(ctx) {
   const ch = loadChannel(ctx.params.id, ctx.user);
+  requireDmOpen(ch, ctx.user.id);
   if (ch.guild_id) {
     need(ch.perms, P.MANAGE_CHANNELS);
   }

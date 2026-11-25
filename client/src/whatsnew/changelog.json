@@ -704,6 +704,21 @@
    "title": "Android app",
    "releases": [
     {
+     "version": "3.7.2",
+     "date": "2026-11-25",
+     "groups": [
+      {
+       "title": "Changed",
+       "items": [
+        "Connecting: if your account still has to accept the terms, the app shows them and connects afterwards. Before, it could not connect.",
+        "Security: a server can no longer make the app save a decrypted attachment outside its own cache folder, and other apps on the phone can no longer open app screens through crafted links.",
+        "The app no longer crashes on unexpected error replies from a server.",
+        "Someone else reading a DM no longer clears your own unread mark or notification."
+       ]
+      }
+     ]
+    },
+    {
      "version": "3.7.1",
      "date": "2026-11-12",
      "groups": [
@@ -1504,6 +1519,21 @@
   {
    "title": "Android-App",
    "releases": [
+    {
+     "version": "3.7.2",
+     "date": "2026-11-25",
+     "groups": [
+      {
+       "title": "Geändert",
+       "items": [
+        "Verbinden: Wenn dein Konto den Bedingungen noch zustimmen muss, zeigt die App sie an und verbindet sich danach. Vorher kam keine Verbindung zustande.",
+        "Sicherheit: Ein Server kann die App nicht mehr dazu bringen, einen entschlüsselten Anhang außerhalb ihres eigenen Cache-Ordners zu speichern, und andere Apps auf dem Handy können über präparierte Links keine Bildschirme der App mehr öffnen.",
+        "Die App stürzt bei unerwarteten Fehlerantworten eines Servers nicht mehr ab.",
+        "Wenn jemand anderes eine DM liest, verschwindet deine eigene Ungelesen-Markierung oder Benachrichtigung nicht mehr."
+       ]
+      }
+     ]
+    },
     {
      "version": "3.7.1",
      "date": "2026-11-12",
